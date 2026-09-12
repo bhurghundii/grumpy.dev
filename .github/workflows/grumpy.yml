@@ -69,7 +69,7 @@ jobs:
 
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             await github.rest.issues.createComment({
