@@ -1,0 +1,49 @@
+name: ci
+
+# The repo's own test suite. Distinct from .github/workflows/grumpy.yml,
+# which is the merge gate grumpy applies to *humans* — that one asks the
+# author a question and has nothing to do with whether the code works.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Catches pyproject.toml dependency edits committed without the
+      # matching lockfile refresh. `uv sync --frozen` (what the Dockerfile
+      # runs) installs from the lock without validating it against
+      # pyproject, so this is the only thing that notices the drift.
+      - name: Check the lockfile is up to date
+        run: uv lock --check
+
+      - name: Lint
+        run: uv run --with ruff ruff check .
+
+      # The suite spins up its own Postgres 16 via Testcontainers; the
+      # ubuntu-latest runner already has a working Docker daemon, and
+      # tests/conftest.py's Docker Desktop workarounds are gated to macOS
+      # so nothing here leaks a container.
+      - name: Test
+        run: uv run pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The README's very first instruction is `docker compose up --build`.
+      # Proving the image still builds keeps that from rotting unnoticed.
+      - name: Build the image
+        run: docker build -t grumpy:ci .

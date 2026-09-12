@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -21,7 +21,7 @@ from app.auth import require_bearer_token
 from app.config import Settings, get_settings
 from app.db import create_pool
 from app.grading import FakeGrader, RealGrader
-from app.logging_config import configure_logging
+from app.logging_config import configure_logging, redact_session_token
 from app.middleware import MaxBodySizeMiddleware
 from app.migrations import run_migrations
 from app.questions import FixedQuestionGenerator
@@ -69,7 +69,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.fake_grader:
         app.state.grader = FakeGrader()
     else:
-        app.state.grader = RealGrader(api_key=settings.model_api_key)
+        app.state.grader = RealGrader(
+            api_key=settings.model_api_key, meaniemode=settings.meaniemode
+        )
 
     startup_logger.info("startup complete", extra={"outcome": "ok"})
 
@@ -124,22 +126,28 @@ async def log_requests(request: Request, call_next):
                 "outcome": outcome,
                 "duration_ms": duration_ms,
                 "method": request.method,
-                "path": request.url.path,
+                # Never request.url.path raw: for /s/{token} routes that
+                # segment is the credential. See redact_session_token.
+                "path": redact_session_token(request.url.path),
             },
         )
 
 
 # Cheap defense-in-depth, concretely relevant here (not just generic
 # hardening): /s/{token}'s path segment *is* the credential — the classic
-# bearer-token-in-a-URL pattern sensitive to leaking via Referer — and
-# templates/result.html already makes a live cross-origin image request
-# from that same URL. No first-party JS anywhere, so the CSP below costs
-# nothing.
+# bearer-token-in-a-URL pattern sensitive to leaking via Referer. No
+# first-party JS anywhere, so the CSP below costs nothing.
+#
+# No `img-src`: it existed only to permit templates/result.html's hotlinked
+# third-party reward image, which is now an inline SVG. With that gone,
+# `default-src 'none'` covers images too, so the pages cannot make any
+# outbound request at all — nothing to leak a session URL to. `style-src`
+# stays for the <style> block each template carries inline.
 _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; img-src https:; style-src 'unsafe-inline'",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
 }
 
 

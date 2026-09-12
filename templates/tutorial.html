@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>grumpy</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1rem; font-weight: normal; color: #555; }
+  pre.diff { background: #f6f8fa; padding: 1rem; overflow-x: auto; font-family: monospace; white-space: pre-wrap; }
+  .add { color: green; }
+  .remove { color: #b00; }
+  .question { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: #555; }
+  .breakdown { background: #f6f8fa; padding: 1rem; margin: 0.5rem 0 1.5rem; }
+  .breakdown :first-child { margin-top: 0; }
+  .breakdown :last-child { margin-bottom: 0; }
+  .breakdown pre, .breakdown code { background: #eee; }
+  .breakdown pre { padding: 0.5rem; overflow-x: auto; }
+  .breakdown code { padding: 0 0.2em; }
+  .breakdown ul, .breakdown ol { padding-left: 1.5rem; }
+  textarea { width: 100%; min-height: 8rem; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
+  .error { color: #b00; }
+  /* Step-through walkthrough. Back/Next are links, not scripted controls:
+     app/main.py ships a CSP with no script-src, so every control on this
+     page has to work as plain HTML. */
+  .progress { color: #888; font-size: 0.9rem; margin: 0; }
+  .step-title { font-size: 1.25rem; margin: 0.25rem 0 0.75rem; }
+  .slice-caption { color: #888; font-size: 0.9rem; font-family: monospace; margin: 0 0 0.25rem; }
+  pre.slice { margin-top: 0; }
+  .gutter { color: #aaa; user-select: none; }
+  .step-nav { margin: 1.5rem 0 0.5rem; display: flex; gap: 0.5rem; }
+  a.btn { display: inline-block; padding: 0.4rem 0.9rem; border: 1px solid #ccc; border-radius: 4px; text-decoration: none; color: #333; background: #fafafa; }
+  a.btn:hover { background: #f0f0f0; }
+  .skip { margin: 0 0 1.5rem; font-size: 0.9rem; }
+  .skip a { color: #888; }
+  details.whole-diff { margin: 1.5rem 0; }
+  details.whole-diff summary { cursor: pointer; color: #555; }
+</style>
+</head>
+<body>
+  <h1>{{ repo }} #{{ pr_number }}</h1>
+
+  {% if steps_total %}
+  <p class="progress">Step {{ step_number }} of {{ steps_total }}</p>
+  <h2 class="step-title">{{ step_title }}</h2>
+
+  {% if step_lines %}
+  <p class="slice-caption">{% if step_file %}{{ step_file }} · {% endif %}{{ step_range }}</p>
+  <pre class="diff slice">{% for number, css, line in step_lines -%}
+<span class="gutter">{{ "%4d" % number }}</span>  <span class="{{ css }}">{{ line }}</span>
+{% endfor -%}</pre>
+  {% endif %}
+
+  <div class="breakdown">{{ step_body|markdown }}</div>
+
+  <nav class="step-nav">
+    {% if prev_step %}<a class="btn" href="?step={{ prev_step }}">&larr; Back</a>{% endif %}
+    {% if next_step %}<a class="btn" href="?step={{ next_step }}">Next step &rarr;</a>{% endif %}
+  </nav>
+  {% if not is_last_step %}
+  <p class="skip"><a href="?step={{ steps_total }}">Skip to the end</a></p>
+  {% endif %}
+
+  <details class="whole-diff">
+    <summary>Show the whole diff</summary>
+    <pre class="diff">{% for css, line in diff_lines -%}
+<span class="{{ css }}">{{ line }}</span>
+{% endfor -%}</pre>
+  </details>
+
+  <p class="question">Original question: {{ question }}</p>
+
+  {% if is_last_step %}
+  <p>Now explain it back in your own words:</p>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  <form method="post" action="/s/{{ token }}/tutorial/explain">
+    <textarea name="explanation" required>{{ explanation_body }}</textarea>
+    <br>
+    <button type="submit">Explain it back</button>
+  </form>
+  {% endif %}
+
+  {% else %}
+  {# No structured steps: a tutorial row written before
+     migrations/V5__tutorial_steps.sql, or a grader that produced none.
+     Render the prose breakdown whole, as this page did before the
+     walkthrough existed. #}
+  <pre class="diff">{% for css, line in diff_lines -%}
+<span class="{{ css }}">{{ line }}</span>
+{% endfor -%}</pre>
+
+  <p class="question">Original question: {{ question }}</p>
+  <div class="breakdown">{{ breakdown|markdown }}</div>
+
+  <p>Now explain it back in your own words:</p>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  <form method="post" action="/s/{{ token }}/tutorial/explain">
+    <textarea name="explanation" required>{{ explanation_body }}</textarea>
+    <br>
+    <button type="submit">Explain it back</button>
+  </form>
+  {% endif %}
+</body>
+</html>

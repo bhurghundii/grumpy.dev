@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder ----
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -31,7 +31,7 @@ COPY migrations ./migrations
 COPY templates ./templates
 
 # ---- runtime ----
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 RUN groupadd --system grumpy && useradd --system --gid grumpy --home /app grumpy
 

@@ -19,12 +19,55 @@ jobs:
   grumpy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # GitHub does not pass secrets to workflow runs triggered by a PR
+      # from a fork, and gives those runs a read-only token. Without this
+      # check the curl below sends `Authorization: Bearer ` (empty), takes
+      # a 401, and fails the job on `curl -sf` — presenting "your PR is
+      # blocked" to an outside contributor who did nothing wrong and
+      # cannot fix it. With the polling loop below, it would do so only
+      # after sitting there for ten minutes first.
+      #
+      # Deliberately NOT solved with `pull_request_target`: that runs the
+      # workflow with secrets against the *base* repo while checking out
+      # untrusted head code, a well-known privilege-escalation footgun. A
+      # maintainer who wants fork PRs gated should run the gate after
+      # merging to a trusted branch.
+      - name: Check grumpy is configured for this run
+        id: config
+        env:
+          GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
+          GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$GRUMPY_BASE_URL" ] && [ -n "$GRUMPY_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+
+          if [ "$IS_FORK" = "true" ]; then
+            reason="this PR is from a fork, and GitHub does not share repository secrets with fork PR runs"
+          else
+            reason="the GRUMPY_BASE_URL and/or GRUMPY_TOKEN repository secrets are not set"
+          fi
+
+          echo "::notice title=grumpy skipped::Not run because $reason."
+          {
+            echo "### grumpy: SKIPPED"
+            echo
+            echo "Not run because $reason."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Ask grumpy
         id: grumpy
+        if: steps.config.outputs.configured == 'true'
         env:
           GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
           GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
@@ -35,16 +78,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          verdict=$(curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
-            --get --data-urlencode "repo=$REPO" \
-            --data-urlencode "pr_number=$PR_NUMBER" \
-            --data-urlencode "head_sha=$HEAD_SHA" \
-            "$GRUMPY_BASE_URL/verdict" | jq -r .status)
+          fetch_verdict() {
+            curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
+              --get --data-urlencode "repo=$REPO" \
+              --data-urlencode "pr_number=$PR_NUMBER" \
+              --data-urlencode "head_sha=$HEAD_SHA" \
+              "$GRUMPY_BASE_URL/verdict" | jq -r .status
+          }
 
+          verdict=$(fetch_verdict)
           echo "current verdict: $verdict"
 
           if [ "$verdict" = "UNKNOWN" ]; then
-            git diff "$BASE_SHA" "$HEAD_SHA" > /tmp/grumpy.diff
+            # Three dots, not two. `git diff A B` is a straight
+            # tree-to-tree comparison, and
+            # github.event.pull_request.base.sha is the tip of the base
+            # branch at event time, NOT the merge base. So once anything
+            # lands on the base branch after this PR was opened, a two-dot
+            # diff also contains the *reverse* of those commits — code the
+            # PR author never touched, presented to them as their own
+            # change and to the grader as a claim about this diff.
+            # `A...B` diffs from the merge base, which is what "the whole
+            # PR against its base" actually means.
+            git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
 
             resp=$(jq -n \
               --arg repo "$REPO" \
@@ -64,12 +120,31 @@ jobs:
             verdict="PENDING"
           fi
 
+          # A PENDING verdict here doesn't mean "fail" — it means nobody's
+          # answered yet, or the answer hasn't landed. Poll instead of
+          # gating on a single stale snapshot: the developer may well
+          # answer while this job is running, and a check that resolves
+          # itself is the point of a merge gate. Without this loop, the
+          # verdict was captured once at job start and the Gate step below
+          # would fail on every run until someone noticed the PR comment
+          # and manually re-ran the job — a correctly answered question
+          # would leave the check red until that manual step happened.
+          # Budget matches INTEGRATION.md's reference workflow: 10 minutes.
+          attempts=30
+          interval=20
+          while [ "$verdict" = "PENDING" ] && [ "$attempts" -gt 0 ]; do
+            sleep "$interval"
+            verdict=$(fetch_verdict)
+            echo "current verdict: $verdict"
+            attempts=$((attempts - 1))
+          done
+
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           echo "### grumpy: $verdict" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             await github.rest.issues.createComment({
@@ -86,7 +161,14 @@ jobs:
             });
 
       - name: Gate
+        env:
+          CONFIGURED: ${{ steps.config.outputs.configured }}
         run: |
+          if [ "$CONFIGURED" != "true" ]; then
+            echo "grumpy is not configured for this run — skipping the gate."
+            exit 0
+          fi
+
           verdict="${{ steps.grumpy.outputs.verdict }}"
           if [ "$verdict" != "PASSED" ]; then
             echo "grumpy verdict is $verdict, not PASSED — blocking merge." >&2
