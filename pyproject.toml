@@ -14,7 +14,7 @@ dependencies = [
     # external HTTP service must be async httpx, never a sync SDK client.
     # First actually used by app/grading.py's RealGrader (phase 4); already
     # a dev dependency since phase 2 for fastapi.testclient.TestClient.
-    "httpx>=0.27",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
