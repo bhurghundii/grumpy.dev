@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # GitHub Actions used in .github/workflows/ (actions/checkout,
+  # actions/github-script).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # The python:3.12-slim base image pinned in Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # pyproject.toml / uv.lock — Dependabot's pip ecosystem reads uv.lock.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"

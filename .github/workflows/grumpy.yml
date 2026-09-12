@@ -1,0 +1,95 @@
+name: grumpy
+
+# Merge gate: asks whoever opened/updated the PR a question about their own
+# diff, and blocks until it's answered correctly. See README for the phase
+# breakdown; this workflow is the "Action" side of the Action-facing API
+# (POST /sessions, GET /verdict).
+#
+# Runs on a GitHub-hosted runner — grumpy is hosted publicly (see the
+# GRUMPY_BASE_URL secret), so any ubuntu-latest runner can reach it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  grumpy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ask grumpy
+        id: grumpy
+        env:
+          GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
+          GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          verdict=$(curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
+            --get --data-urlencode "repo=$REPO" \
+            --data-urlencode "pr_number=$PR_NUMBER" \
+            --data-urlencode "head_sha=$HEAD_SHA" \
+            "$GRUMPY_BASE_URL/verdict" | jq -r .status)
+
+          echo "current verdict: $verdict"
+
+          if [ "$verdict" = "UNKNOWN" ]; then
+            git diff "$BASE_SHA" "$HEAD_SHA" > /tmp/grumpy.diff
+
+            resp=$(jq -n \
+              --arg repo "$REPO" \
+              --argjson pr_number "$PR_NUMBER" \
+              --arg head_sha "$HEAD_SHA" \
+              --arg base_sha "$BASE_SHA" \
+              --rawfile diff /tmp/grumpy.diff \
+              '{repo: $repo, pr_number: $pr_number, head_sha: $head_sha, base_sha: $base_sha, diff: $diff}' \
+              | curl -sf -X POST \
+                  -H "Authorization: Bearer $GRUMPY_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  --data @- \
+                  "$GRUMPY_BASE_URL/sessions")
+
+            session_url=$(echo "$resp" | jq -r .session_url)
+            echo "session_url=$session_url" >> "$GITHUB_OUTPUT"
+            verdict="PENDING"
+          fi
+
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "### grumpy: $verdict" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment session link
+        if: steps.grumpy.outputs.session_url
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                "🧐 **grumpy** has a question about this change:",
+                "",
+                `${{ steps.grumpy.outputs.session_url }}`,
+                "",
+                "Answer it, then re-run this check (Checks tab → grumpy → Re-run job)."
+              ].join("\n"),
+            });
+
+      - name: Gate
+        run: |
+          verdict="${{ steps.grumpy.outputs.verdict }}"
+          if [ "$verdict" != "PASSED" ]; then
+            echo "grumpy verdict is $verdict, not PASSED — blocking merge." >&2
+            exit 1
+          fi
+          echo "grumpy verdict is PASSED."

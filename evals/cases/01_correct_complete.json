@@ -1,0 +1,7 @@
+{
+  "diff": "diff --git a/cache.py b/cache.py\nindex 1111111..2222222 100644\n--- a/cache.py\n+++ b/cache.py\n@@ -10,8 +10,14 @@ class Cache:\n     def get(self, key):\n-        return self._store.get(key)\n+        entry = self._store.get(key)\n+        if entry is None:\n+            return None\n+        value, expires_at = entry\n+        if expires_at < time.time():\n+            del self._store[key]\n+            return None\n+        return value\n \n-    def set(self, key, value):\n-        self._store[key] = value\n+    def set(self, key, value, ttl_seconds=60):\n+        self._store[key] = (value, time.time() + ttl_seconds)\n",
+  "question": "What does this change do, and what breaks if it's wrong?",
+  "answer": "This adds expiry to the cache. Each entry now stores a value plus an expiry timestamp set from a TTL (default 60s) passed to set(). get() checks whether the stored expiry has passed; if so, it deletes the entry and returns None instead of the stale value. If this were implemented wrong -- say the expiry check compared the wrong timestamp, or set() didn't store expires_at at all -- get() would either return stale values forever (cache never expires) or expire everything immediately (cache never actually caches anything).",
+  "expected_passed": true,
+  "note": "Correct and complete."
+}

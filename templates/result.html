@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>grumpy</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1rem; font-weight: normal; color: #555; }
+  pre.diff { background: #f6f8fa; padding: 1rem; overflow-x: auto; font-family: monospace; white-space: pre-wrap; }
+  .add { color: green; }
+  .remove { color: #b00; }
+  .question { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  .answer { white-space: pre-wrap; background: #f6f8fa; padding: 1rem; }
+  .verdict { font-weight: bold; }
+  .reasoning { white-space: pre-wrap; color: #555; margin-top: 0.5rem; }
+  .reward { max-width: 20rem; display: block; margin-top: 1rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>{{ repo }} #{{ pr_number }}</h1>
+  <pre class="diff">{% for css, line in diff_lines -%}
+<span class="{{ css }}">{{ line }}</span>
+{% endfor -%}</pre>
+
+  <p class="question">{{ question }}</p>
+  <div class="answer">{{ answer_body }}</div>
+
+  <p class="verdict">{{ "PASSED" if status == "passed" else "FAILED" }}</p>
+  {% if reasoning -%}
+  <p class="reasoning">{{ reasoning }}</p>
+  {% endif -%}
+  {% if status == "passed" -%}
+  <img class="reward" alt="you did it, congratulations to you"
+       src="https://sportshub.cbsistatic.com/i/r/2016/07/21/32f2aff1-0a5c-4d80-9950-2e56bdd87ed4/resize/750x422/9b74a482ce759b2173248c14567603a4/obama-meme.jpg">
+  {% endif -%}
+</body>
+</html>

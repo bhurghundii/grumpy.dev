@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>grumpy</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1rem; font-weight: normal; color: #555; }
+  pre.diff { background: #f6f8fa; padding: 1rem; overflow-x: auto; font-family: monospace; white-space: pre-wrap; }
+  .add { color: green; }
+  .remove { color: #b00; }
+  .question { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  textarea { width: 100%; min-height: 8rem; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
+  .error { color: #b00; }
+</style>
+</head>
+<body>
+  <h1>{{ repo }} #{{ pr_number }}</h1>
+  <pre class="diff">{% for css, line in diff_lines -%}
+<span class="{{ css }}">{{ line }}</span>
+{% endfor -%}</pre>
+
+  <p class="question">{{ question }}</p>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  <form method="post" action="/s/{{ token }}/answer">
+    <textarea name="answer" required>{{ answer_body }}</textarea>
+    <br>
+    <button type="submit">Submit</button>
+  </form>
+</body>
+</html>

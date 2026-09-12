@@ -1,0 +1,346 @@
+{
+  "info": {
+    "name": "grumpy",
+    "description": "grumpy — a merge gate that checks the developer understands the change.\n\nRun against a local `docker compose up --build` (see the repo README). Out of the box, `.env.example` sets `FAKE_GRADER=true`, so no Anthropic API key is needed to exercise the full flow locally — see the \"Answer page\" folder for how FakeGrader decides pass/fail.\n\nSet `grumpy_token` below to whatever `GRUMPY_TOKEN` is in your `.env` (defaults to a placeholder in `.env.example` — generate a real one, or copy the one you're actually running with).\n\n\"Create session\" captures the returned token into the `session_token` variable automatically, so the requests in \"Answer page\" work without manual copy-paste. Each run of \"Create session\" also randomizes `head_sha`/`base_sha` via a pre-request script, so you get a fresh session every time instead of hitting the idempotent-replay path — useful since a session only accepts one answer.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "type": "string" },
+    { "key": "grumpy_token", "value": "changeme-generate-a-real-token", "type": "string" },
+    { "key": "repo", "value": "octo/demo", "type": "string" },
+    { "key": "pr_number", "value": "1", "type": "string" },
+    { "key": "head_sha", "value": "1111111111111111111111111111111111111111", "type": "string" },
+    { "key": "base_sha", "value": "2222222222222222222222222222222222222222", "type": "string" },
+    { "key": "session_token", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": ["{{base_url}}"],
+              "path": ["healthz"]
+            },
+            "description": "Unauthenticated. Checks the real DB connection, not a literal — 200 {\"status\": \"ok\"} when healthy, 503 {\"status\": \"error\"} otherwise."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Action-facing API (bearer auth)",
+      "item": [
+        {
+          "name": "Create session",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh head_sha/base_sha each run, so this creates a new session",
+                  "// instead of idempotently replaying an existing one.",
+                  "function randomHex(len) {",
+                  "    let s = '';",
+                  "    for (let i = 0; i < len; i++) s += Math.floor(Math.random() * 16).toString(16);",
+                  "    return s;",
+                  "}",
+                  "pm.variables.set('head_sha', randomHex(40));",
+                  "pm.variables.set('base_sha', randomHex(40));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 or 201', function () {",
+                  "    pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.session_url.split('/').pop();",
+                  "    pm.collectionVariables.set('session_token', token);",
+                  "    console.log('session_token captured:', token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{grumpy_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"{{repo}}\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"{{head_sha}}\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"diff --git a/cache.py b/cache.py\\nindex 1111111..2222222 100644\\n--- a/cache.py\\n+++ b/cache.py\\n@@ -10,6 +10,10 @@ class Cache:\\n     def get(self, key):\\n-        return self._store.get(key)\\n+        entry = self._store.get(key)\\n+        if entry is None:\\n+            return None\\n+        return entry\\n\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["sessions"]
+            },
+            "description": "201 on first creation for this (repo, pr_number, head_sha) triple; 200 with the same session_url on any repeat call — this is the idempotency two concurrent Action runs rely on. Captures the token into {{session_token}} for the requests below."
+          }
+        },
+        {
+          "name": "Create session (repeat — expect 200, same URL)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{grumpy_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"{{repo}}\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"{{head_sha}}\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"diff --git a/cache.py b/cache.py\\nindex 1111111..2222222 100644\\n--- a/cache.py\\n+++ b/cache.py\\n@@ -10,6 +10,10 @@ class Cache:\\n     def get(self, key):\\n-        return self._store.get(key)\\n+        entry = self._store.get(key)\\n+        if entry is None:\\n+            return None\\n+        return entry\\n\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["sessions"]
+            },
+            "description": "Run this right after \"Create session\" without changing anything — same head_sha, so it should return 200 (not 201) with the identical session_url."
+          }
+        },
+        {
+          "name": "Get verdict",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{grumpy_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/verdict?repo={{repo}}&pr_number={{pr_number}}&head_sha={{head_sha}}",
+              "host": ["{{base_url}}"],
+              "path": ["verdict"],
+              "query": [
+                { "key": "repo", "value": "{{repo}}" },
+                { "key": "pr_number", "value": "{{pr_number}}" },
+                { "key": "head_sha", "value": "{{head_sha}}" }
+              ]
+            },
+            "description": "{\"status\": ...} — one of UNKNOWN, PENDING, PASSED, FAILED. Run this before answering (PENDING) and after (PASSED/FAILED) to see it change."
+          }
+        },
+        {
+          "name": "Get verdict — unknown SHA (expect UNKNOWN)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{grumpy_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/verdict?repo={{repo}}&pr_number={{pr_number}}&head_sha=ffffffffffffffffffffffffffffffffffffffff",
+              "host": ["{{base_url}}"],
+              "path": ["verdict"],
+              "query": [
+                { "key": "repo", "value": "{{repo}}" },
+                { "key": "pr_number", "value": "{{pr_number}}" },
+                { "key": "head_sha", "value": "ffffffffffffffffffffffffffffffffffffffff" }
+              ]
+            },
+            "description": "A SHA no session was ever created for returns UNKNOWN, not PENDING — this is what tells the Action to create a fresh session after a force-push."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Answer page (unauthenticated — token is the credential)",
+      "item": [
+        {
+          "name": "View answer page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/s/{{session_token}}",
+              "host": ["{{base_url}}"],
+              "path": ["s", "{{session_token}}"]
+            },
+            "description": "Run \"Create session\" first. Renders the diff, the question, and the answer form (or a read-only result page if already decided)."
+          }
+        },
+        {
+          "name": "Submit answer — PASS (contains marker)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "answer",
+                  "value": "looks-good, this makes sense to me",
+                  "description": "FakeGrader (the local default, FAKE_GRADER=true) passes only if the answer contains the literal string 'looks-good'."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/s/{{session_token}}/answer",
+              "host": ["{{base_url}}"],
+              "path": ["s", "{{session_token}}", "answer"]
+            },
+            "description": "303 redirect back to the session page on success. A session only accepts one answer (409 on a second submission) — run \"Create session\" again for a fresh one before trying the FAIL example below."
+          }
+        },
+        {
+          "name": "Submit answer — FAIL (no marker)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "answer",
+                  "value": "I don't understand what this does",
+                  "description": "No marker string -> FakeGrader fails it."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/s/{{session_token}}/answer",
+              "host": ["{{base_url}}"],
+              "path": ["s", "{{session_token}}", "answer"]
+            },
+            "description": "Run \"Create session\" again first for a fresh, still-pending session — this will 409 against a session the PASS example already decided."
+          }
+        },
+        {
+          "name": "Submit answer — empty (expect 422, inline error)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [{ "key": "answer", "value": "   " }]
+            },
+            "url": {
+              "raw": "{{base_url}}/s/{{session_token}}/answer",
+              "host": ["{{base_url}}"],
+              "path": ["s", "{{session_token}}", "answer"]
+            },
+            "description": "Whitespace-only answer re-renders the form with an inline error and writes no answers row — the session stays pending and answerable."
+          }
+        },
+        {
+          "name": "View unknown token (expect generic 404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/s/this-token-was-never-issued",
+              "host": ["{{base_url}}"],
+              "path": ["s", "this-token-was-never-issued"]
+            },
+            "description": "A token that never existed gets a generic 404 — deliberately not distinguishable from a swept/expired one."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth failure examples",
+      "item": [
+        {
+          "name": "Create session — missing token (expect 401)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"{{repo}}\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"{{head_sha}}\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"diff --git a/x b/x\\n+hello\\n\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/sessions", "host": ["{{base_url}}"], "path": ["sessions"] }
+          }
+        },
+        {
+          "name": "Get verdict — wrong token (expect 401)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer not-the-real-token" }],
+            "url": {
+              "raw": "{{base_url}}/verdict?repo={{repo}}&pr_number={{pr_number}}&head_sha={{head_sha}}",
+              "host": ["{{base_url}}"],
+              "path": ["verdict"],
+              "query": [
+                { "key": "repo", "value": "{{repo}}" },
+                { "key": "pr_number", "value": "{{pr_number}}" },
+                { "key": "head_sha", "value": "{{head_sha}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation error examples",
+      "item": [
+        {
+          "name": "Create session — invalid repo format (expect 422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{grumpy_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"not-a-valid-repo\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"{{head_sha}}\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"diff --git a/x b/x\\n+hello\\n\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/sessions", "host": ["{{base_url}}"], "path": ["sessions"] },
+            "description": "repo must be 'owner/name'."
+          }
+        },
+        {
+          "name": "Create session — short SHA (expect 422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{grumpy_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"{{repo}}\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"abc123\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"diff --git a/x b/x\\n+hello\\n\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/sessions", "host": ["{{base_url}}"], "path": ["sessions"] },
+            "description": "head_sha/base_sha must be full 40-character hex — short SHAs are rejected, not resolved."
+          }
+        },
+        {
+          "name": "Create session — oversized diff (expect 413)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('big_diff', 'x'.repeat(1000001));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{grumpy_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo\": \"{{repo}}\",\n  \"pr_number\": {{pr_number}},\n  \"head_sha\": \"{{head_sha}}\",\n  \"base_sha\": \"{{base_sha}}\",\n  \"diff\": \"{{big_diff}}\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/sessions", "host": ["{{base_url}}"], "path": ["sessions"] },
+            "description": "Default max_diff_bytes is 1,000,000 — one byte over returns 413."
+          }
+        }
+      ]
+    }
+  ]
+}
