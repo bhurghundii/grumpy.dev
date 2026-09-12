@@ -1,0 +1,7 @@
+{
+  "diff": "diff --git a/cache.py b/cache.py\nindex 1111111..2222222 100644\n--- a/cache.py\n+++ b/cache.py\n@@ -10,8 +10,14 @@ class Cache:\n     def get(self, key):\n-        return self._store.get(key)\n+        entry = self._store.get(key)\n+        if entry is None:\n+            return None\n+        value, expires_at = entry\n+        if expires_at < time.time():\n+            del self._store[key]\n+            return None\n+        return value\n \n-    def set(self, key, value):\n-        self._store[key] = value\n+    def set(self, key, value, ttl_seconds=60):\n+        self._store[key] = (value, time.time() + ttl_seconds)\n",
+  "question": "What does this change do, and what breaks if it's wrong?",
+  "answer": "This makes the cache expire entries after a TTL - get() returns None once time's up instead of the old value.",
+  "expected_passed": true,
+  "note": "Correct but terse, covering roughly half the change: omits that expired entries also get deleted from the store and doesn't mention the default TTL value or the 'what breaks' half of the question. Minor omissions, not the point of the change -- should still pass."
+}

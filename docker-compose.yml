@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-grumpy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grumpy}
+      POSTGRES_DB: ${POSTGRES_DB:-grumpy}
+    ports:
+      # Published on 5433, not 5432 — 5432 is already bound on the
+      # reference dev machine. This only affects the host-side mapping;
+      # inside the compose network `app` still reaches `db` on 5432.
+      - "5433:5432"
+    volumes:
+      - grumpy-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-grumpy} -d ${POSTGRES_DB:-grumpy}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-grumpy}:${POSTGRES_PASSWORD:-grumpy}@db:5432/${POSTGRES_DB:-grumpy}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GRUMPY_BASE_URL: ${GRUMPY_BASE_URL:?set GRUMPY_BASE_URL in .env}
+      GRUMPY_TOKEN: ${GRUMPY_TOKEN:?set GRUMPY_TOKEN in .env}
+      GRUMPY_ALLOWED_REPOS: ${GRUMPY_ALLOWED_REPOS:-}
+      FAKE_GRADER: ${FAKE_GRADER:?set FAKE_GRADER in .env}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  grumpy-db-data:

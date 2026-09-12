@@ -1,0 +1,62 @@
+diff --git a/billing/webhooks.py b/billing/webhooks.py
+index 3a1c2f1..9e7d0b4 100644
+--- a/billing/webhooks.py
++++ b/billing/webhooks.py
+@@ -1,6 +1,7 @@
+ import logging
++import time
+
+-from billing.locks import acquire_charge_lock
++from billing.locks import acquire_charge_lock, release_charge_lock
+ from billing.store import charge_already_processed, record_charge
+
+ logger = logging.getLogger(__name__)
+@@ -12,15 +13,26 @@ def handle_charge_succeeded(event: dict) -> None:
+     provider matters, and Stripe retries webhook delivery on any non-2xx
+     response, so this handler will see the same event more than once.
+     """
+-    lock = acquire_charge_lock(event["charge_id"])
+-    try:
+-        if charge_already_processed(event["charge_id"]):
+-            logger.info("charge %s already processed, skipping", event["charge_id"])
+-            return
+-        record_charge(event["charge_id"], event["amount"])
+-    finally:
+-        lock.release()
++    charge_id = event["charge_id"]
++
++    # Check before taking the lock: the common case on a retry is that the
++    # charge is already recorded, and acquire_charge_lock() itself talks to
++    # Redis, so skip that round trip entirely when we can.
++    if charge_already_processed(charge_id):
++        logger.info("charge %s already processed, skipping", charge_id)
++        return
++
++    lock = acquire_charge_lock(charge_id)
++    try:
++        # Re-check inside the lock: another worker may have finished
++        # processing this exact charge between our check above and
++        # acquiring the lock.
++        if charge_already_processed(charge_id):
++            logger.info("charge %s already processed, skipping", charge_id)
++            return
++        record_charge(charge_id, event["amount"])
++    finally:
++        release_charge_lock(lock)
+diff --git a/billing/tests/test_webhooks.py b/billing/tests/test_webhooks.py
+index 7c1e9aa..b6f2d31 100644
+--- a/billing/tests/test_webhooks.py
++++ b/billing/tests/test_webhooks.py
+@@ -20,3 +20,15 @@ def test_handle_charge_succeeded_records_charge():
+     handle_charge_succeeded(event)
+
+     assert charge_already_processed("ch_123")
++
++
++def test_handle_charge_succeeded_is_idempotent_on_retry():
++    event = {"charge_id": "ch_456", "amount": 4200}
++
++    handle_charge_succeeded(event)
++    handle_charge_succeeded(event)  # simulates Stripe's webhook retry
++
++    assert charge_count("ch_456") == 1

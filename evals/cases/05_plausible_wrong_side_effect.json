@@ -1,0 +1,7 @@
+{
+  "diff": "diff --git a/cache.py b/cache.py\nindex 1111111..2222222 100644\n--- a/cache.py\n+++ b/cache.py\n@@ -10,8 +10,14 @@ class Cache:\n     def get(self, key):\n-        return self._store.get(key)\n+        entry = self._store.get(key)\n+        if entry is None:\n+            return None\n+        value, expires_at = entry\n+        if expires_at < time.time():\n+            del self._store[key]\n+            return None\n+        return value\n \n-    def set(self, key, value):\n-        self._store[key] = value\n+    def set(self, key, value, ttl_seconds=60):\n+        self._store[key] = (value, time.time() + ttl_seconds)\n",
+  "question": "What does this change do, and what breaks if it's wrong?",
+  "answer": "This adds expiry to cache entries via a TTL. Once an entry expires, get() automatically re-fetches the current value from the database and re-caches it before returning, so callers always get fresh data without a cache miss. If this were wrong, callers could occasionally see a brief delay while the re-fetch happens.",
+  "expected_passed": false,
+  "note": "Correctly identifies the TTL/expiry mechanism, but fabricates an automatic re-fetch-from-database side effect the diff does not implement -- it just deletes the entry and returns None, nothing re-fetches or re-caches anything. Plausible-sounding and topically on-point, but factually wrong about a side effect. This is the case that catches a grader that only checks topic overlap."
+}

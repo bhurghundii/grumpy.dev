@@ -1,0 +1,7 @@
+{
+  "diff": "diff --git a/cache.py b/cache.py\nindex 1111111..2222222 100644\n--- a/cache.py\n+++ b/cache.py\n@@ -10,8 +10,14 @@ class Cache:\n     def get(self, key):\n-        return self._store.get(key)\n+        entry = self._store.get(key)\n+        if entry is None:\n+            return None\n+        value, expires_at = entry\n+        if expires_at < time.time():\n+            del self._store[key]\n+            return None\n+        return value\n \n-    def set(self, key, value):\n-        self._store[key] = value\n+    def set(self, key, value, ttl_seconds=60):\n+        self._store[key] = (value, time.time() + ttl_seconds)\n",
+  "question": "What does this change do, and what breaks if it's wrong?",
+  "answer": "This one make cache have expire time now. Before get() just return value always, is wrong because old value never go away. Now get() check time, if pass then return None and delete. set() also take extra ttl_seconds number for how long keep it. If this broken, maybe cache never delete old data, use too much memory, or maybe delete too fast and cache not helpful anymore.",
+  "expected_passed": true,
+  "note": "Content is correct and reasonably complete; English is rough/non-native. Must still pass -- terse or poorly written phrasing is explicitly fine per the grading rule. This is the case that catches a grader that has quietly learned to reward fluency."
+}
