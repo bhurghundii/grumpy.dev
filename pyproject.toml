@@ -2,26 +2,59 @@
 name = "grumpy"
 version = "0.1.0"
 description = "grumpy — a merge gate that checks the developer understands the change"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "psycopg[binary,pool]>=3.2",
-    "pydantic-settings>=2.4",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "psycopg[binary,pool]>=3.3.4",
+    "pydantic-settings>=2.15.0",
     "jinja2>=3.1.6",
     "python-multipart>=0.0.32",
     # Phase 1 §7's own convention: any code path that calls a model or an
     # external HTTP service must be async httpx, never a sync SDK client.
     # First actually used by app/grading.py's RealGrader (phase 4); already
     # a dev dependency since phase 2 for fastapi.testclient.TestClient.
-    "httpx>=0.27",
+    "httpx>=0.28.1",
+    # app/rendering.py: markdown text (tutorial breakdowns, grading
+    # reasoning) is rendered to HTML server-side and shown on the
+    # unauthenticated /s/{token} page. `markdown` alone doesn't sanitize
+    # its output, and that text ultimately traces back to a PR diff — an
+    # attacker-controlled input to the grading model — so `nh3` (the
+    # maintained, Rust-backed successor to `bleach`) always runs over the
+    # result before it's marked safe for Jinja2.
+    "markdown>=3.10.3",
+    "nh3>=0.3.7",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3",
-    "testcontainers[postgres]>=4.8",
+    "pytest>=9.1.1",
+    "testcontainers[postgres]>=4.15.0",
 ]
 
 [tool.uv]
 package = false
+
+[tool.ruff]
+# 100, not the default 88: this codebase carries unusually long explanatory
+# comments and SQL string literals, and reflowing them to 88 would hurt the
+# thing that makes them worth reading.
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F (pyflakes + pycodestyle), I (import sorting), UP (pyupgrade),
+# B (bugbear). Deliberately not the full ruleset — this is a lint pass to
+# catch real mistakes and keep imports tidy, not a style rewrite of a
+# codebase that already reads consistently.
+select = ["E", "F", "I", "UP", "B"]
+
+# The long lines here are overwhelmingly SQL string literals and test
+# fixtures, where the wrapped version is harder to read than the long one.
+# `line-length` above still governs `ruff format`; this only stops the lint
+# gate from failing on them, so adopting linting didn't require reflowing
+# 23 unrelated lines immediately before a release.
+ignore = ["E501"]

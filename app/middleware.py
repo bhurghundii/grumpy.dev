@@ -1,10 +1,9 @@
 """Pure-ASGI middleware for the public v1 release.
 
 Not `@app.middleware("http")`/`BaseHTTPMiddleware` — Starlette buffers the
-body before that style ever sees it, which is exactly the gap this closes
-(see audit.md's "unbounded request bodies" finding). This has to intercept
-`receive()` itself, at the raw ASGI level, before Starlette/Pydantic ever
-turns the body into a Python object.
+body before that style ever sees it, which is exactly the gap this closes.
+This has to intercept `receive()` itself, at the raw ASGI level, before
+Starlette/Pydantic ever turns the body into a Python object.
 """
 
 from __future__ import annotations

@@ -12,6 +12,16 @@
   .question { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
   textarea { width: 100%; min-height: 8rem; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
   .error { color: #b00; }
+  .verdict { font-weight: bold; margin-bottom: 0; }
+  .reasoning { color: #555; margin-top: 0.25rem; }
+  .reasoning :first-child { margin-top: 0; }
+  .reasoning :last-child { margin-bottom: 0; }
+  .reasoning pre, .reasoning code { background: #eee; }
+  .reasoning pre { padding: 0.5rem; overflow-x: auto; }
+  .reasoning code { padding: 0 0.2em; }
+  .reasoning ul, .reasoning ol { padding-left: 1.5rem; }
+  .attempts { color: #888; font-size: 0.9rem; }
+  .actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
@@ -22,12 +32,36 @@
 
   <p class="question">{{ question }}</p>
 
+  {% if previous_reasoning %}
+  <p class="verdict">Not quite:</p>
+  <div class="reasoning">{{ previous_reasoning|markdown }}</div>
+  {% endif %}
+  {% if tutorial_feedback %}
+  <p class="verdict">Your explanation of the tutorial:</p>
+  <div class="reasoning">{{ tutorial_feedback|markdown }}</div>
+  {% endif %}
+  {% if max_session_attempts %}
+  <p class="attempts">Attempt {{ attempts_used + 1 }} of {{ max_session_attempts }}</p>
+  {% endif %}
+
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
   <form method="post" action="/s/{{ token }}/answer">
     <textarea name="answer" required>{{ answer_body }}</textarea>
-    <br>
-    <button type="submit">Submit</button>
+    <div class="actions">
+      <button type="submit">Submit</button>
+      {# The tutorial button posts to a different route, so it lives in its
+         own (empty) form below and is wired to it by `form=` — that keeps it
+         next to Submit without nesting forms, and keeps the textarea's
+         `required` from blocking a tutorial request. #}
+      {% if show_tutorial_option %}
+      <button type="submit" form="tutorial-form">Get a tutorial breakdown</button>
+      {% endif %}
+    </div>
   </form>
+
+  {% if show_tutorial_option %}
+  <form id="tutorial-form" method="post" action="/s/{{ token }}/tutorial"></form>
+  {% endif %}
 </body>
 </html>

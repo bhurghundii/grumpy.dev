@@ -1,5 +1,5 @@
 """Public-v1 hardening: docs disabled, security response headers, and the
-ASGI-level request body size cap (app/middleware.py). See audit.md.
+ASGI-level request body size cap (app/middleware.py).
 """
 
 from __future__ import annotations
@@ -84,3 +84,24 @@ def test_normal_request_within_limits_still_succeeds(grumpy_env) -> None:
         )
 
     assert response.status_code == 201
+
+
+def test_csp_forbids_all_outbound_subresource_requests(grumpy_env) -> None:
+    """`default-src 'none'` with no `img-src` means a rendered page cannot
+    fetch anything at all. That matters here specifically: /s/{token} URLs
+    are credentials, and an outbound request from one of those pages is a
+    way for that URL to reach a third party. The only exception is
+    `style-src`, for the <style> block each template carries inline.
+
+    img-src previously allowed `https:` solely to permit a hotlinked
+    third-party reward image on the pass page, now an inline SVG.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        csp = client.get("/healthz").headers["content-security-policy"]
+
+    assert csp == "default-src 'none'; style-src 'unsafe-inline'"
+    assert "img-src" not in csp

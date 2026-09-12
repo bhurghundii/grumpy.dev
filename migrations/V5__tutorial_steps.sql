@@ -1,0 +1,27 @@
+-- V5__tutorial_steps.sql
+-- Structured form of the tutorial breakdown: an ordered array of steps,
+-- each anchored to a line range of the diff, so the developer-facing page
+-- can walk them one at a time with just that step's slice of code beside
+-- it (templates/tutorial.html) rather than printing one wall of prose.
+--
+-- Shape, per element: {title, body, start_line, end_line}. Line numbers
+-- are 1-based and inclusive over the diff as split by str.splitlines() —
+-- the indexing app/web.py:_classify_diff produces. start_line/end_line
+-- may be null: app/grading.py:_parse_step drops an anchor it can't
+-- resolve rather than the whole step, so a step can legitimately arrive
+-- with prose and no slice.
+--
+-- Nullable, and `breakdown` stays NOT NULL alongside it holding the same
+-- content flattened to prose (app/grading.py:_flatten_steps). That keeps
+-- three things working at once: tutorial rows written before this
+-- migration still render (via the template's fallback branch, which
+-- `steps IS NULL` selects), grade_explanation still receives a plain
+-- string, and nothing has to backfill. Same nullable-for-legacy-rows
+-- reasoning as V2__answers_grading_metadata.sql and V4__tutorials.sql.
+--
+-- JSONB rather than a tutorial_steps table: steps are only ever read and
+-- written whole, with the parent row, and are never queried or joined
+-- across. A child table would buy ordering and referential integrity that
+-- a single ordered array already has for free.
+
+ALTER TABLE tutorials ADD COLUMN IF NOT EXISTS steps JSONB;

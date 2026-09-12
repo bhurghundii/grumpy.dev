@@ -107,7 +107,20 @@ class Settings(BaseSettings):
 
     # Above this, POST /sessions returns 413 rather than persisting the diff
     # (and, later, handing an unbounded field to a model call).
-    max_diff_bytes: int = 1_000_000
+    #
+    # 400 KB, not the 1 MB this used to be, because the ceiling that
+    # actually binds is the model's context window, not Postgres. At
+    # roughly 3–4 bytes per token a 1 MB diff is ~250k–330k tokens, past
+    # claude-opus-5's context — and app/grading.py's tutorial call sends
+    # the diff *numbered*, which adds several bytes per line on top. The
+    # old default therefore accepted diffs that could never be graded: the
+    # API rejected the call, RealGrader turned that into a GradingError,
+    # and the developer got "please try submitting your answer again"
+    # forever, with nothing telling them the diff was simply too big.
+    # 400 KB is ~100k–130k tokens, leaving comfortable room for the
+    # prompts, the response, and thinking. A refusal now happens once, at
+    # session creation, with a 413 that says what was wrong.
+    max_diff_bytes: int = 400_000
 
     # Hard cap on the raw request body, enforced by MaxBodySizeMiddleware
     # (app/middleware.py) against actual bytes received off the wire —
@@ -126,6 +139,37 @@ class Settings(BaseSettings):
     # prose answer; exists to bound Postgres storage and Anthropic API
     # spend per submission, not to constrain legitimate answers.
     max_answer_bytes: int = 20_000
+
+    # Total priced actions (graded answer submissions + tutorial-breakdown
+    # requests, combined) allowed per session before it locks in as
+    # terminal 'failed'. 0 means unlimited — the session just stays
+    # 'pending' after every wrong answer, forever, until it's passed; see
+    # app/verdict.py, which keeps reporting PENDING for exactly as long as
+    # that's true. A tutorial request costs exactly as much Anthropic
+    # spend as an answer submission (2 calls each), so both are charged
+    # against the same budget rather than two separate knobs — a cap that
+    # only bounded answers would leave tutorial requests as an unbounded
+    # cost hole. Defaults finite, like every other numeric cap in this
+    # file, rather than unlimited.
+    max_session_attempts: int = 3
+
+    # Whether the answer page offers "Get a tutorial breakdown" at all.
+    # When on it sits next to Submit from the first view, so a developer
+    # can ask for the walkthrough without first having to answer wrong.
+    # Off by default — this is additional AI-call surface (2 more calls
+    # per tutorial, on top of MAX_SESSION_ATTEMPTS's own spend) that a
+    # self-hoster should opt into deliberately rather than get for free.
+    # Only gates *new* tutorial requests (POST /s/{token}/tutorial); a
+    # tutorial already in progress when this flips off is still allowed
+    # to be explained back.
+    enable_tutorial: bool = False
+
+    # Whether a failed verdict's `reasoning` uses the scathing, sarcastic
+    # "grumpy" roast persona (RealGrader's comparison prompt, app/grading.py)
+    # or a direct, professional tone instead. Off by default — a fresh
+    # deployment (e.g. an enterprise self-hoster) gets the professional tone
+    # with zero config; opt into the roast explicitly with MEANIEMODE=true.
+    meaniemode: bool = False
 
     # Required, no default — which grader to use is exactly the kind of
     # consequential choice this project doesn't silently default (same
@@ -155,14 +199,24 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("max_session_attempts")
+    @classmethod
+    def _reject_negative_session_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(
+                "MAX_SESSION_ATTEMPTS must be 0 (unlimited) or a positive "
+                f"integer, got {value}"
+            )
+        return value
+
     @model_validator(mode="after")
-    def _require_model_key_unless_fake(self) -> "Settings":
+    def _require_model_key_unless_fake(self) -> Settings:
         if not self.fake_grader and not self.model_api_key:
             raise ValueError("MODEL_API_KEY is required when FAKE_GRADER=false")
         return self
 
     @model_validator(mode="after")
-    def _validate_allowed_repos(self) -> "Settings":
+    def _validate_allowed_repos(self) -> Settings:
         repos = _parse_allowed_repos(self.grumpy_allowed_repos)
         if repos is not None:
             bad = sorted(r for r in repos if not _REPO_SHAPE_RE.match(r))
@@ -174,7 +228,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_body_size_relationship(self) -> "Settings":
+    def _validate_body_size_relationship(self) -> Settings:
         if self.max_request_body_bytes < self.max_diff_bytes:
             raise ValueError(
                 "MAX_REQUEST_BODY_BYTES "

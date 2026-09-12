@@ -32,7 +32,7 @@ The response looks like:
 ```json
 {
   "session_url": "https://grumpy.example.com/s/<token>",
-  "status": "PENDING",
+  "status": "pending",
   "question": "What does this change do, and what breaks if it's wrong?"
 }
 ```
@@ -54,112 +54,112 @@ Status values are:
 
 In GitHub repository or organization secrets, set:
 
-- `GRUMPY_URL` — public base URL of the deployed grumpy app, such as `https://grumpy.example.com`
+- `GRUMPY_BASE_URL` — public base URL of the deployed grumpy app, such as `https://grumpy.example.com`
 - `GRUMPY_TOKEN` — the same value configured as `GRUMPY_TOKEN` on the server
 
 ## Example GitHub Actions workflow
+
+The canonical, maintained copy of this workflow is
+[.github/workflows/grumpy.yml](.github/workflows/grumpy.yml) — grumpy runs it
+on its own PRs. Copy that file rather than the abridged version below, which
+exists to show the shape at a glance. (An earlier revision of this document
+carried its own full copy, which drifted: it named a `GRUMPY_URL` secret the
+workflow never read.)
 
 ```yaml
 name: grumpy-review-gate
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   grumpy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
-      - name: Check out code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create grumpy review session
-        id: session
+      - name: Ask grumpy
+        id: grumpy
         env:
-          GRUMPY_URL: ${{ secrets.GRUMPY_URL }}
+          GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
           GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          REPO="${{ github.repository }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
+          verdict=$(curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
+            --get --data-urlencode "repo=$REPO" \
+            --data-urlencode "pr_number=$PR_NUMBER" \
+            --data-urlencode "head_sha=$HEAD_SHA" \
+            "$GRUMPY_BASE_URL/verdict" | jq -r .status)
 
-          DIFF="$(git diff --binary "$BASE_SHA" "$HEAD_SHA")"
+          if [ "$verdict" = "UNKNOWN" ]; then
+            git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
+            # ... POST /sessions with that diff, then comment the session URL
+            verdict="PENDING"
+          fi
 
-          PAYLOAD="$(jq -nc \
-            --arg repo "$REPO" \
-            --argjson pr_number "$PR_NUMBER" \
-            --arg head_sha "$HEAD_SHA" \
-            --arg base_sha "$BASE_SHA" \
-            --arg diff "$DIFF" \
-            '{repo:$repo, pr_number:$pr_number, head_sha:$head_sha, base_sha:$base_sha, diff:$diff}')"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
 
-          RESPONSE="$(curl -sS -X POST "$GRUMPY_URL/sessions" \
-            -H "Authorization: Bearer $GRUMPY_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$PAYLOAD")"
-
-          echo "$RESPONSE"
-
-          echo "SESSION_URL=$(echo "$RESPONSE" | jq -r '.session_url')" >> "$GITHUB_OUTPUT"
-          echo "QUESTION=$(echo "$RESPONSE" | jq -r '.question')" >> "$GITHUB_OUTPUT"
-
-      - name: Show review URL
+      - name: Gate
         run: |
-          echo "Grumpy review URL: ${{ steps.session.outputs.SESSION_URL }}"
-          echo "Question: ${{ steps.session.outputs.QUESTION }}"
-
-      - name: Wait for verdict
-        env:
-          GRUMPY_URL: ${{ secrets.GRUMPY_URL }}
-          GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          REPO="${{ github.repository }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-
-          for i in $(seq 1 60); do
-            STATUS="$(curl -sS -G "$GRUMPY_URL/verdict" \
-              --data-urlencode "repo=$REPO" \
-              --data-urlencode "pr_number=$PR_NUMBER" \
-              --data-urlencode "head_sha=$HEAD_SHA" \
-              -H "Authorization: Bearer $GRUMPY_TOKEN" \
-              | jq -r '.status')"
-
-            echo "Current grumpy status: $STATUS"
-
-            case "$STATUS" in
-              PASSED)
-                echo "Review passed."
-                exit 0
-                ;;
-              FAILED)
-                echo "Review failed."
-                exit 1
-                ;;
-              UNKNOWN|PENDING)
-                ;;
-              *)
-                echo "Unexpected status: $STATUS" >&2
-                exit 1
-                ;;
-            esac
-
-            sleep 10
-          done
-
-          echo "Timed out waiting for grumpy verdict" >&2
-          exit 1
+          [ "${{ steps.grumpy.outputs.verdict }}" = "PASSED" ] || exit 1
 ```
+
+### Polling for the verdict
+
+The shipped workflow polls `GET /verdict` while the status is `PENDING`, for
+up to ten minutes (30 attempts, 20 seconds apart), then gates on whatever it
+last saw.
+
+This is a deliberate trade-off, and worth understanding before you change it.
+Without the loop the verdict is captured once at job start, so a developer
+who answers correctly while the job is running still sees a red check until
+somebody notices the PR comment and manually re-runs it. Polling lets the
+check resolve itself, which is the point of a merge gate.
+
+The cost is runner time: every second spent waiting on a human is billed as
+Actions minutes, and the job holds a runner for the duration. If that matters
+more to you than self-resolving checks, drop the loop and gate on a single
+reading — verdicts are durable once written, so a re-run picks them up.
+
+Either way, do not raise the budget much past ten minutes. A developer may
+take hours to answer, and no polling budget survives that.
+
+### Fork pull requests
+
+GitHub does not share repository secrets with workflow runs triggered by a
+PR from a fork, and gives those runs a read-only token. Without a guard, the
+bearer token interpolates to an empty string, the API returns 401, `curl -sf`
+exits non-zero, and an outside contributor sees their PR blocked by an error
+they cannot fix.
+
+The shipped workflow detects this and skips the gate with an explanatory
+notice. Do not reach for `pull_request_target` to "fix" it: that pairs your
+secrets with a checkout of untrusted head code. If you want fork PRs gated,
+run the gate after merging to a trusted branch.
+
+### The diff range must use three dots
+
+`git diff "$BASE_SHA...$HEAD_SHA"`, not `git diff "$BASE_SHA" "$HEAD_SHA"`.
+
+`github.event.pull_request.base.sha` is the tip of the base branch when the
+event fired, not the merge base. A two-dot diff between them therefore also
+contains the *reverse* of every commit that landed on the base branch after
+the PR was opened — code the author never touched, shown to them as their
+own change and sent to the grader as a claim about this diff. Three dots
+diffs from the merge base, which is what "the whole PR against its base"
+means.
 
 ## Important configuration details
 
@@ -191,7 +191,7 @@ The app requires full 40-character SHAs for both `head_sha` and `base_sha`.
 
 This app is meant to be run as a normal web service, usually behind HTTPS and a reverse proxy or container orchestration layer. The GitHub workflow simply invokes the API and blocks on the verdict.
 
-grumpy has no built-in rate limiting — your reverse proxy or CDN must provide it, along with request body-size limits, before `GRUMPY_BASE_URL` is reachable from the public internet. See [README.md's "Before you deploy publicly"](README.md#before-you-deploy-publicly) for the full pre-launch checklist (rate limiting, proxy access-log redaction for `/s/{token}`, Anthropic spend limits, and the accepted-risk items).
+grumpy has no built-in rate limiting — your reverse proxy or CDN must provide it, along with request body-size limits, before `GRUMPY_BASE_URL` is reachable from the public internet. See [README.md's "Self-hosting: before you make it public"](README.md#self-hosting-before-you-make-it-public) for the full pre-launch checklist (rate limiting, proxy access-log redaction for `/s/{token}`, Anthropic spend limits, and the accepted-risk items).
 
 ## Typical usage pattern
 

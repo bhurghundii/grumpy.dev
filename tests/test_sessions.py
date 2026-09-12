@@ -121,7 +121,7 @@ def test_rejects_oversized_diff_with_413(grumpy_env) -> None:
         "repo": _unique_repo("bigdiff"),
         "head_sha": "b2" * 20,
         "base_sha": "c3" * 20,
-        "diff": "x" * 1_000_001,  # default max_diff_bytes is 1_000_000
+        "diff": "x" * 400_001,  # default max_diff_bytes is 400_000
     }
     with TestClient(app) as client:
         response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))

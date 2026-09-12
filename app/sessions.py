@@ -15,7 +15,7 @@ already committed, so the subsequent SELECT is guaranteed to find it.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -52,7 +52,7 @@ async def create_or_get_session(
     """Returns (session_row, created). created is True only if this call's
     insert won the race; False means a session already existed (created by
     a prior request or a concurrent one that committed first)."""
-    expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
     params = {
         "repo": repo,
         "pr_number": pr_number,
