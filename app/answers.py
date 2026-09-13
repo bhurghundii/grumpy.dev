@@ -33,8 +33,8 @@ _COUNT_ANSWERS_SQL = "SELECT count(*) FROM answers WHERE session_id = %(session_
 _COUNT_TUTORIALS_SQL = "SELECT count(*) FROM tutorials WHERE session_id = %(session_id)s"
 
 _INSERT_ANSWER_SQL = """
-    INSERT INTO answers (session_id, body, passed, model, prompt_version, reasoning, created_at)
-    VALUES (%(session_id)s, %(body)s, %(passed)s, %(model)s, %(prompt_version)s, %(reasoning)s, now())
+    INSERT INTO answers (session_id, body, passed, model, prompt_version, reasoning, js_active, created_at)
+    VALUES (%(session_id)s, %(body)s, %(passed)s, %(model)s, %(prompt_version)s, %(reasoning)s, %(js_active)s, now())
 """
 
 # Only ever transitions a session out of 'pending' — a request that loses
@@ -78,6 +78,7 @@ async def record_answer(
     model: str | None = None,
     prompt_version: str | None = None,
     reasoning: str | None = None,
+    js_active: bool | None = None,
 ) -> str:
     """Inserts the answer row and decides the resulting session status in
     the same transaction as the write, counting existing answers AND
@@ -88,6 +89,9 @@ async def record_answer(
     means never, i.e. unlimited retries); otherwise the session stays
     'pending' so /verdict keeps reporting PENDING and the developer can
     retry. Returns the resulting status.
+
+    `js_active` (whether the paste guard was running) is stored alongside,
+    never consulted here — see migrations/V6__paste_guard.sql.
     """
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -113,6 +117,7 @@ async def record_answer(
                     "model": model,
                     "prompt_version": prompt_version,
                     "reasoning": reasoning,
+                    "js_active": js_active,
                 },
             )
             await cur.execute(

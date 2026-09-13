@@ -46,6 +46,13 @@ Findings from a pre-release audit, fixed.
 - A `ci` workflow running lint, the test suite, `uv lock --check`, and a
   Docker build. Nothing ran the tests on a PR before.
 - Ruff configuration.
+- A paste guard on the answer and explain-back textareas, suggested by
+  csgrant. A small same-origin script (`app/static/nopaste.js`) blocks
+  pasting and dropping text in. That's friction, not enforcement, so whether
+  it was running is recorded per submission (`answers.js_active`,
+  `tutorials.explanation_js_active`, migration V6) and logged as
+  `outcome: no_js` when it wasn't — never used to fail an answer. The CSP
+  gains `script-src 'self'`; inline script is still refused.
 
 **Changed**
 

@@ -20,8 +20,9 @@
   textarea { width: 100%; min-height: 8rem; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
   .error { color: #b00; }
   /* Step-through walkthrough. Back/Next are links, not scripted controls:
-     app/main.py ships a CSP with no script-src, so every control on this
-     page has to work as plain HTML. */
+     every control on this page has to work as plain HTML. The only script,
+     app/static/nopaste.js, is the paste guard — nothing here depends on it,
+     and app/main.py's CSP allows no inline script to build on. */
   .progress { color: #888; font-size: 0.9rem; margin: 0; }
   .step-title { font-size: 1.25rem; margin: 0.25rem 0 0.75rem; }
   .slice-caption { color: #888; font-size: 0.9rem; font-family: monospace; margin: 0 0 0.25rem; }
@@ -34,7 +35,9 @@
   .skip a { color: #888; }
   details.whole-diff { margin: 1.5rem 0; }
   details.whole-diff summary { cursor: pointer; color: #555; }
+  .paste-note { color: #b00; font-size: 0.9rem; margin: 0.25rem 0 0; }
 </style>
+<script src="/static/nopaste.js" defer></script>
 </head>
 <body>
   <h1>{{ repo }} #{{ pr_number }}</h1>

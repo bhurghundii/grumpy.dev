@@ -7,6 +7,7 @@ authorship is an open product question, not implemented here.)
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from psycopg.errors import UniqueViolation
 
 from app.answers import count_answers, fetch_latest_answer, fetch_session_by_token, record_answer
 from app.grading import GradingError
+from app.logging_config import redact_session_token
 from app.rendering import render_markdown
 from app.tutorials import (
     count_tutorials,
@@ -35,6 +37,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.filters["markdown"] = render_markdown
 
 router = APIRouter()
+logger = logging.getLogger("grumpy.web")
 
 _NOT_FOUND = {"heading": "Not found", "message": "This link isn't valid."}
 _EXPIRED = {
@@ -162,6 +165,28 @@ def _can_afford_tutorial(attempts_used: int, cap: int) -> bool:
     what you learned. cap == 0 is unlimited.
     """
     return cap == 0 or attempts_used < cap - 1
+
+
+def _log_if_unguarded(request: Request, session: dict, js_active: bool) -> None:
+    """A submission without `js_active` came from a page where
+    app/static/nopaste.js never ran — JavaScript off, the script blocked,
+    or no browser at all (curl) — so pasting wasn't blocked for it. Logged,
+    not refused: the guard is friction, and grading is what decides.
+
+    Called only once a submission is about to be recorded, so a rejected
+    or failed-to-grade POST doesn't log twice when it's retried."""
+    if js_active:
+        return
+    logger.warning(
+        "submitted without paste guard",
+        extra={
+            "repo": session["repo"],
+            "pr_number": session["pr_number"],
+            "outcome": "no_js",
+            # Never request.url.path raw — see app/main.py:log_requests.
+            "path": redact_session_token(request.url.path),
+        },
+    )
 
 
 def _answer_context(
@@ -312,7 +337,9 @@ async def view_session(request: Request, token: str) -> HTMLResponse:
 
 
 @router.post("/s/{token}/answer")
-async def submit_answer(request: Request, token: str, answer: str = Form(...)) -> HTMLResponse:
+async def submit_answer(
+    request: Request, token: str, answer: str = Form(...), js_active: bool = Form(False)
+) -> HTMLResponse:
     pool = request.app.state.pool
     settings = request.app.state.settings
     session = await fetch_session_by_token(pool, token)
@@ -363,6 +390,7 @@ async def submit_answer(request: Request, token: str, answer: str = Form(...)) -
         )
         return templates.TemplateResponse(request, "answer.html", context, status_code=502)
 
+    _log_if_unguarded(request, session, js_active)
     await record_answer(
         pool,
         session_id=session["id"],
@@ -372,6 +400,7 @@ async def submit_answer(request: Request, token: str, answer: str = Form(...)) -
         model=result.model,
         prompt_version=result.prompt_version,
         reasoning=result.reasoning,
+        js_active=js_active,
     )
 
     # Post/redirect/get: a page refresh after this must re-fetch the result,
@@ -459,7 +488,7 @@ async def request_tutorial(request: Request, token: str) -> HTMLResponse:
 
 @router.post("/s/{token}/tutorial/explain")
 async def submit_tutorial_explanation(
-    request: Request, token: str, explanation: str = Form(...)
+    request: Request, token: str, explanation: str = Form(...), js_active: bool = Form(False)
 ) -> HTMLResponse:
     pool = request.app.state.pool
     settings = request.app.state.settings
@@ -519,6 +548,7 @@ async def submit_tutorial_explanation(
         )
         return templates.TemplateResponse(request, "tutorial.html", context, status_code=502)
 
+    _log_if_unguarded(request, session, js_active)
     await record_tutorial_explanation(
         pool,
         tutorial_id=latest_tutorial["id"],
@@ -527,6 +557,7 @@ async def submit_tutorial_explanation(
         reasoning=result.reasoning,
         model=result.model,
         prompt_version=result.prompt_version,
+        js_active=js_active,
     )
 
     # Pass or fail, this always unlocks a fresh attempt at the original

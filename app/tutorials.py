@@ -38,7 +38,8 @@ _UPDATE_EXPLANATION_SQL = """
         passed = %(passed)s,
         reasoning = %(reasoning)s,
         model = %(model)s,
-        prompt_version = %(prompt_version)s
+        prompt_version = %(prompt_version)s,
+        explanation_js_active = %(js_active)s
     WHERE id = %(tutorial_id)s
 """
 
@@ -132,10 +133,12 @@ async def record_tutorial_explanation(
     reasoning: str | None = None,
     model: str | None = None,
     prompt_version: str | None = None,
+    js_active: bool | None = None,
 ) -> None:
     """Never touches sessions.status — the explain-back result (pass or
     fail) always unlocks a fresh answer attempt; it never gates anything
-    itself (see app/grading.py's _EXPLAIN_BACK_SYSTEM_PROMPT)."""
+    itself (see app/grading.py's _EXPLAIN_BACK_SYSTEM_PROMPT). `js_active`
+    is stored only, as in app/answers.py:record_answer."""
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -147,5 +150,6 @@ async def record_tutorial_explanation(
                     "reasoning": reasoning,
                     "model": model,
                     "prompt_version": prompt_version,
+                    "js_active": js_active,
                 },
             )
