@@ -13,9 +13,11 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.auth import require_bearer_token
 from app.config import Settings, get_settings
@@ -88,6 +90,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # shape — not something a public v1 should expose by default.
 app = FastAPI(title="grumpy", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(web_router)
+# Holds one file, app/static/nopaste.js (the paste guard on the answer and
+# explain-back textareas). Served same-origin so the CSP below can allow it
+# with `script-src 'self'` and nothing looser.
+app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
 
 # Must be added before the @app.middleware("http") functions below are
 # declared. Starlette's middleware stack nests in registration order: the
@@ -135,19 +141,25 @@ async def log_requests(request: Request, call_next):
 
 # Cheap defense-in-depth, concretely relevant here (not just generic
 # hardening): /s/{token}'s path segment *is* the credential — the classic
-# bearer-token-in-a-URL pattern sensitive to leaking via Referer. No
-# first-party JS anywhere, so the CSP below costs nothing.
+# bearer-token-in-a-URL pattern sensitive to leaking via Referer.
+#
+# `script-src 'self'` exists for exactly one file, app/static/nopaste.js.
+# Same-origin files only, never 'unsafe-inline': an inline <script> or on*
+# handler smuggled into rendered markdown still doesn't run (see
+# app/rendering.py). `nosniff` keeps 'self' from stretching to grumpy's
+# HTML or JSON responses — browsers won't execute those as script.
 #
 # No `img-src`: it existed only to permit templates/result.html's hotlinked
 # third-party reward image, which is now an inline SVG. With that gone,
-# `default-src 'none'` covers images too, so the pages cannot make any
-# outbound request at all — nothing to leak a session URL to. `style-src`
-# stays for the <style> block each template carries inline.
+# `default-src 'none'` covers images too (and `connect-src`, so the paste
+# guard can't phone home either), so the pages cannot make any outbound
+# request at all — nothing to leak a session URL to. `style-src` stays for
+# the <style> block each template carries inline.
 _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'",
 }
 
 

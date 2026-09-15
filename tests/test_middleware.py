@@ -87,11 +87,14 @@ def test_normal_request_within_limits_still_succeeds(grumpy_env) -> None:
 
 
 def test_csp_forbids_all_outbound_subresource_requests(grumpy_env) -> None:
-    """`default-src 'none'` with no `img-src` means a rendered page cannot
-    fetch anything at all. That matters here specifically: /s/{token} URLs
-    are credentials, and an outbound request from one of those pages is a
-    way for that URL to reach a third party. The only exception is
-    `style-src`, for the <style> block each template carries inline.
+    """`default-src 'none'` with no `img-src` or `connect-src` means a
+    rendered page cannot fetch anything off-origin at all. That matters
+    here specifically: /s/{token} URLs are credentials, and an outbound
+    request from one of those pages is a way for that URL to reach a third
+    party. The exceptions are `style-src`, for the <style> block each
+    template carries inline, and `script-src 'self'`, for the same-origin
+    paste guard (app/static/nopaste.js) — which must never grow
+    'unsafe-inline', or injected markup could run script.
 
     img-src previously allowed `https:` solely to permit a hotlinked
     third-party reward image on the pass page, now an inline SVG.
@@ -103,5 +106,8 @@ def test_csp_forbids_all_outbound_subresource_requests(grumpy_env) -> None:
     with TestClient(app) as client:
         csp = client.get("/healthz").headers["content-security-policy"]
 
-    assert csp == "default-src 'none'; style-src 'unsafe-inline'"
+    assert csp == "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'"
     assert "img-src" not in csp
+    assert "connect-src" not in csp
+    script_src = next(d for d in csp.split(";") if d.strip().startswith("script-src"))
+    assert "'unsafe-inline'" not in script_src

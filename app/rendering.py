@@ -2,11 +2,11 @@
 templates: the tutorial breakdown, grading `reasoning`, and the developer's
 own answer text (templates/tutorial.html, result.html, answer.html).
 
-Rendered entirely server-side, on purpose: app/main.py ships a CSP with no
-`script-src` (`default-src 'none'`) on the strength of there being zero
-first-party JS anywhere, and a client-side markdown library would mean
-reopening that. Converting to HTML here, before the response goes out,
-keeps that hardening untouched.
+Rendered entirely server-side, on purpose: app/main.py ships a CSP whose
+`script-src` is `'self'` alone — one same-origin file, the paste guard
+(app/static/nopaste.js), and no inline script at all — and a client-side
+markdown library would mean widening that. Converting to HTML here, before
+the response goes out, keeps that hardening untouched.
 
 The LLM-generated text this renders ultimately traces back to a PR diff —
 attacker-controlled input to the grading model (see app/grading.py's

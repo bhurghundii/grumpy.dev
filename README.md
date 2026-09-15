@@ -129,7 +129,7 @@ grumpy's `/sessions` and `/verdict` endpoints are bearer-gated, but the answer p
 - **Treat `GRUMPY_TOKEN` as a real secret**, and set `GRUMPY_ALLOWED_REPOS` if you want a leaked token to not be usable against arbitrary repos.
 - **Diffs are stored in Postgres in plaintext** — scope database access like it holds source code, because it does.
 
-grumpy does ship a few defaults out of the box: interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled; `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options` and a `Content-Security-Policy` of `default-src 'none'; style-src 'unsafe-inline'` are sent on every response (no `script-src` and no `img-src` — the pages make no outbound requests at all, so there is nothing a session URL can leak to); request bodies are capped against bytes actually received rather than a client-supplied `Content-Length`; transient model-API failures are retried with backoff instead of surfacing to the developer; and session tokens are kept out of the logs.
+grumpy does ship a few defaults out of the box: interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled; `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options` and a `Content-Security-Policy` of `default-src 'none'; style-src 'unsafe-inline'; script-src 'self'` are sent on every response (the only script allowed is grumpy's own same-origin paste guard — no inline script, no `img-src`, no `connect-src` — so the pages make no outbound requests at all, and there is nothing a session URL can leak to); request bodies are capped against bytes actually received rather than a client-supplied `Content-Length`; transient model-API failures are retried with backoff instead of surfacing to the developer; and session tokens are kept out of the logs.
 
 ## Local development
 
@@ -147,11 +147,13 @@ Migrations (`migrations/*.sql`) apply automatically on startup via a small built
 
 ## Tech stack
 
-Python, FastAPI, `uv`, psycopg3 (async, raw SQL, no ORM), Postgres 16, server-rendered Jinja2 templates with no client-side JavaScript. Grading calls the Anthropic Messages API directly over async httpx. See [`pyproject.toml`](pyproject.toml) for exact versions.
+Python, FastAPI, `uv`, psycopg3 (async, raw SQL, no ORM), Postgres 16, server-rendered Jinja2 templates. The only client-side JavaScript is a small paste guard on the answer box ([`app/static/nopaste.js`](app/static/nopaste.js)); every page works without it. Grading calls the Anthropic Messages API directly over async httpx. See [`pyproject.toml`](pyproject.toml) for exact versions.
 
 ## Limitations
 
 The question grumpy asks is currently fixed — it doesn't generate a new question per diff. There's no author-identity check (the session URL alone is the credential), no confidence scores or partial credit, no multi-turn follow-up, and no queue — grading happens synchronously inside the answer submission. Grumpy is also, in principle, prompt-injection-attackable: both the diff and the developer's answer are attacker-influenceable text fed to an LLM. The blind-interpretation grading design (see `app/grading.py`) blunts the obvious cases but isn't a formal defense.
+
+The answer box blocks pasting, but that's friction, not enforcement: anyone can retype text, turn JavaScript off, or POST the form directly. A submission made without the guard running is still graded normally — it's recorded (`answers.js_active` / `tutorials.explanation_js_active` = `false`) and logged with `outcome: no_js`, not failed.
 
 ## License
 

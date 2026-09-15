@@ -8,6 +8,7 @@ FakeGrader passes only when the answer contains the marker string
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 
 import httpx
@@ -17,6 +18,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from app.answers import fetch_session_by_token
+from app.logging_config import JsonFormatter
 from app.main import app
 from app.tutorials import create_tutorial
 
@@ -80,6 +82,45 @@ def _tutorial_count(database_url: str, session_token: str) -> int:
             (session_token,),
         ).fetchone()
     return row[0]
+
+
+# The one <script> the answer and tutorial pages may carry
+# (app/static/nopaste.js). Tests asserting that model output can't smuggle
+# a script onto a page strip exactly this tag first, so they still catch
+# any other.
+_PASTE_GUARD_TAG = '<script src="/static/nopaste.js" defer></script>'
+
+
+def _without_paste_guard(html: str) -> str:
+    return html.replace(_PASTE_GUARD_TAG, "")
+
+
+def _answer_js_active_flags(database_url: str, session_token: str) -> list[bool | None]:
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT a.js_active FROM answers a
+            JOIN sessions s ON s.id = a.session_id
+            WHERE s.token = %s
+            ORDER BY a.created_at
+            """,
+            (session_token,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def _explanation_js_active_flags(database_url: str, session_token: str) -> list[bool | None]:
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT t.explanation_js_active FROM tutorials t
+            JOIN sessions s ON s.id = t.session_id
+            WHERE s.token = %s
+            ORDER BY t.created_at
+            """,
+            (session_token,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 # The next three helpers exist because FakeGrader's output is fixed
@@ -542,7 +583,7 @@ def test_tutorial_step_body_markdown_is_rendered_and_sanitized(
 
     assert "<strong>First step</strong>" in page.text
     assert "**First step**" not in page.text
-    assert "<script" not in page.text
+    assert "<script" not in _without_paste_guard(page.text)
 
 
 def test_tutorial_explain_back_failing_still_unlocks_retry(grumpy_env, monkeypatch) -> None:
@@ -850,7 +891,7 @@ def test_tutorial_breakdown_markdown_is_rendered_and_sanitized(
         page = client.get(f"/s/{token}")
 
     assert "<strong>First step</strong>" in page.text
-    assert "<script" not in page.text
+    assert "<script" not in _without_paste_guard(page.text)
     assert "**First step**" not in page.text
     # Legacy shape: the whole breakdown at once, and the explain-back form
     # right there — no steps to page through.
@@ -878,7 +919,7 @@ def test_previous_reasoning_markdown_is_rendered_and_sanitized(
         page = client.get(f"/s/{token}")
 
     assert "<code>foo()</code>" in page.text
-    assert "<script" not in page.text
+    assert "<script" not in _without_paste_guard(page.text)
 
 
 def test_result_page_reasoning_markdown_is_rendered_and_sanitized(
@@ -926,7 +967,7 @@ def test_tutorial_feedback_markdown_is_rendered_and_sanitized(
         page = client.get(f"/s/{token}")
 
     assert "<strong>the key point</strong>" in page.text
-    assert "<script" not in page.text
+    assert "<script" not in _without_paste_guard(page.text)
 
 
 # --- Tutorial budget: the last attempt is reserved for answering ---------
@@ -1075,3 +1116,128 @@ def test_cap_of_one_never_offers_a_tutorial(
         token = _token_from_url(session["session_url"])
 
         assert "/tutorial" not in client.get(f"/s/{token}").text
+
+
+# --- Paste guard (app/static/nopaste.js, migrations/V6__paste_guard.sql) --
+#
+# The blocking itself is browser behaviour, out of reach of TestClient.
+# These cover what the server owns: the script is served and referenced,
+# and whether it ran is recorded per submission — never enforced.
+
+
+def test_paste_guard_script_is_served_as_javascript(grumpy_env) -> None:
+    with TestClient(app) as client:
+        response = client.get("/static/nopaste.js")
+
+    assert response.status_code == 200
+    # nosniff is on: served as anything but JavaScript, browsers won't run it.
+    assert "javascript" in response.headers["content-type"]
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "insertFromPaste" in response.text
+
+
+def test_paste_guard_is_loaded_on_both_pages_with_a_textarea(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    suffix = secrets.token_hex(4)
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=f"octo/guard-answer-{suffix}")
+        answer_page = client.get(f"/s/{_token_from_url(created['session_url'])}")
+
+        tutorial_token = _seed_walkthrough(
+            client, database_url, grumpy_env.token, f"octo/guard-tutorial-{suffix}"
+        )
+        last_step = client.get(f"/s/{tutorial_token}", params={"step": 2})
+
+    assert "<textarea" in answer_page.text
+    assert answer_page.text.count(_PASTE_GUARD_TAG) == 1
+    assert "<textarea" in last_step.text
+    assert last_step.text.count(_PASTE_GUARD_TAG) == 1
+
+
+def test_answer_records_whether_the_paste_guard_ran(grumpy_env, database_url: str) -> None:
+    """A missing `js_active` is the "script never ran" case (JS off, curl).
+    It's recorded, but the answer is still graded normally — here it's the
+    one that passes."""
+    repo = f"octo/guard-flag-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=repo)
+        token = _token_from_url(created["session_url"])
+
+        client.post(
+            f"/s/{token}/answer",
+            data={"answer": "I have no idea", "js_active": "1"},
+            follow_redirects=False,
+        )
+        unguarded = client.post(
+            f"/s/{token}/answer", data={"answer": "looks-good"}, follow_redirects=False
+        )
+        assert unguarded.status_code == 303
+
+        assert "PASSED" in client.get(f"/s/{token}").text
+
+    assert _answer_js_active_flags(database_url, token) == [True, False]
+
+
+def test_tutorial_explanation_records_whether_the_paste_guard_ran(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "0")  # room for two tutorials
+    repo = f"octo/guard-explain-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=repo)
+        token = _token_from_url(created["session_url"])
+
+        client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        client.post(
+            f"/s/{token}/tutorial/explain",
+            data={"explanation": "i-understand", "js_active": "1"},
+            follow_redirects=False,
+        )
+        client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        unguarded = client.post(
+            f"/s/{token}/tutorial/explain",
+            data={"explanation": "i-understand"},
+            follow_redirects=False,
+        )
+        assert unguarded.status_code == 303
+
+    assert _explanation_js_active_flags(database_url, token) == [True, False]
+
+
+def test_unguarded_submission_is_logged_without_the_token(grumpy_env) -> None:
+    """Captured the way tests/test_logging.py does, not with caplog:
+    configure_logging() replaces root.handlers at startup, so a handler
+    has to be attached afterwards or every assertion passes vacuously."""
+    emitted: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(self.format(record))
+
+    repo = f"octo/guard-log-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=repo)
+        token = _token_from_url(created["session_url"])
+
+        handler = Capture()
+        handler.setFormatter(JsonFormatter())
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            client.post(
+                f"/s/{token}/answer",
+                data={"answer": "I have no idea", "js_active": "1"},
+                follow_redirects=False,
+            )
+            client.post(f"/s/{token}/answer", data={"answer": "looks-good"}, follow_redirects=False)
+        finally:
+            root.removeHandler(handler)
+
+    no_js = [line for line in emitted if '"outcome": "no_js"' in line]
+    assert len(no_js) == 1, "only the submission without js_active is logged"
+    assert "/s/<redacted>/answer" in no_js[0]
+    assert repo in no_js[0]
+    assert token not in "\n".join(emitted)
