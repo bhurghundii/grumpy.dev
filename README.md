@@ -1,14 +1,25 @@
-# grumpy
+# grumpy - the AI that grills your devs
 
-**A merge gate that checks the developer understands the change — not just that the tests pass.**
+**A merge gate that checks the developer understands the change they are putting in.**
 
-grumpy sits in your PR pipeline as a GitHub Action. Before a PR can merge, grumpy asks whoever opened it one question about their own diff — *"What does this change do, and what breaks if it's wrong?"* — and blocks the merge until they answer it well enough to convince an LLM grader. Tests prove the code runs; grumpy checks that a human can actually explain it.
+grumpy sits in your PR pipeline as a GitHub Action. Before a PR can merge, grumpy asks whoever opened it one question about their own diff — *"What does this change do, and what breaks if it's wrong?"* — and blocks the merge until they answer it well enough to convince an LLM grader. 
 
-It exists for the world where a growing share of PRs are AI-generated or AI-assisted, and "LGTM, CI is green" is no longer good enough evidence that the person clicking merge knows what they're shipping.
+## Why should you care?
 
-- **No SaaS, no signup.** grumpy is self-hosted only — one Docker Compose command and it's running.
-- **No GitHub App, no OAuth, no webhooks.** It's a small FastAPI service that a GitHub Action talks to over a bearer token. Nothing to install on the GitHub side beyond a workflow file.
+More and more PRs are AI-generated or AI-assisted, and "LGTM, CI is green" is no longer good enough evidence that the person clicking merge knows what they're shipping. For business critical software, this is unacceptable.
+
+- **YAGNI the SaaS** grumpy is self-hosted only - one Docker Compose command and it's running.
+- **No GitHub App, no OAuth, no webhooks.** It's a small FastAPI service that a GitHub Action talks to over a bearer token. Nothing to install on the GitHub side beyond a workflow file. Just keep the token a secret.
 - **Real grading, not a keyword check.** Answers are graded by Claude against a blind interpretation of the diff, so it can't be gamed by echoing the question back.
+- **Tutorials to help you understand the code** - Submitted a 3,000 line monstrosity? Grumpy will break it down to explain how it works. (Dev note: I learned about Firebase Security Rules changes this way that I would've totally missed so really needed this)
+
+## Need a demo? 
+
+Check out the PRs and see it in action 
+
+### Isn't it ironic the solution to cognitive debt caused by vibe coding is more vibe slop? 
+
+Yeah but I got a business to run so I am trying my best here. 
 
 ## How it works
 
@@ -52,7 +63,7 @@ Open the printed URL, answer the question, and watch the verdict resolve.
 
 ## Deploying to Railway
 
-The reference deployment of grumpy runs on [Railway](https://railway.com). Nothing in grumpy depends on Railway — any host that can run the Dockerfile next to a Postgres 16 database works — but if you want to follow the known-good path:
+The reference deployment of grumpy runs on [Railway](https://railway.com). Nothing in grumpy depends on Railway — any host that can run the Dockerfile next to a Postgres 16 database works - I just personally use Railway cause it was easy:
 
 1. **Create the project from your fork.** In Railway, *New Project → Deploy from GitHub repo* and pick your fork. Railway detects the `Dockerfile` and builds from it; no `railway.toml` is needed.
 2. **Add Postgres.** In the same project, *+ New → Database → PostgreSQL*. Migrations apply automatically when the app starts, so there's nothing to run by hand.
@@ -73,34 +84,6 @@ The reference deployment of grumpy runs on [Railway](https://railway.com). Nothi
 7. **Wire up the repo** as below, using that same URL for the `GRUMPY_BASE_URL` secret and the same token for `GRUMPY_TOKEN`.
 
 The `Dockerfile` intentionally skips a BuildKit cache mount because Railway's builder requires one scoped to its own internal service ID (see the comment in the file). A Railway domain is still on the public internet, so the [before you make it public](#self-hosting-before-you-make-it-public) checklist applies here too.
-
-## Wire it into a repo
-
-Add a workflow that calls grumpy on every PR and blocks merge on the result. Minimal shape:
-
-```yaml
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-
-jobs:
-  grumpy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Ask grumpy
-        env:
-          GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
-          GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
-        run: |
-          # POST /sessions with the diff, then poll GET /verdict until
-          # PASSED or FAILED. Full script with all the edge cases handled:
-          # see INTEGRATION.md.
-```
-
-The full working workflow (session creation, polling loop, timeouts) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with).
 
 ## Configuration
 
@@ -130,6 +113,36 @@ grumpy's `/sessions` and `/verdict` endpoints are bearer-gated, but the answer p
 - **Diffs are stored in Postgres in plaintext** — scope database access like it holds source code, because it does.
 
 grumpy does ship a few defaults out of the box: interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled; `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options` and a `Content-Security-Policy` of `default-src 'none'; style-src 'unsafe-inline'; script-src 'self'` are sent on every response (the only script allowed is grumpy's own same-origin paste guard — no inline script, no `img-src`, no `connect-src` — so the pages make no outbound requests at all, and there is nothing a session URL can leak to); request bodies are capped against bytes actually received rather than a client-supplied `Content-Length`; transient model-API failures are retried with backoff instead of surfacing to the developer; and session tokens are kept out of the logs.
+
+## Wire it into a repo
+
+(This is the part where you just shove the instructions into an LLM) 
+
+Add a workflow that calls grumpy on every PR and blocks merge on the result. Minimal shape:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  grumpy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ask grumpy
+        env:
+          GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
+          GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
+        run: |
+          # POST /sessions with the diff, then poll GET /verdict until
+          # PASSED or FAILED. Full script with all the edge cases handled:
+          # see INTEGRATION.md.
+```
+
+The full working workflow (session creation, polling loop, timeouts) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with).
 
 ## Local development
 
