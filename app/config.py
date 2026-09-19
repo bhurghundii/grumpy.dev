@@ -94,6 +94,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Optional — a GitHub token with "Commit statuses: write" on the gated
+    # repos. When set, grumpy posts a `grumpy/verdict` commit status on the
+    # PR's head commit (pending, then success/failure once an answer is
+    # graded) — see app/commit_status.py. Unset or blank posts nothing, and
+    # an Action has to gate on GET /verdict itself.
+    github_status_token: str | None = None
+
+    # Only worth changing for GitHub Enterprise Server, whose REST API lives
+    # at https://<host>/api/v3.
+    github_api_url: str = "https://api.github.com"
+
     log_level: str = "INFO"
 
     db_pool_min_size: int = 1

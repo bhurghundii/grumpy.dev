@@ -37,6 +37,12 @@ _SELECT_SQL = """
 """
 
 
+def build_session_url(base_url: str, token: str) -> str:
+    """Built from the configured base URL, never a request's Host header —
+    a self-hoster behind a proxy would otherwise get an internal-only URL."""
+    return f"{base_url.rstrip('/')}/s/{token}"
+
+
 async def create_or_get_session(
     pool: AsyncConnectionPool,
     *,

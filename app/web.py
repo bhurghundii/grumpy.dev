@@ -21,6 +21,7 @@ from app.answers import count_answers, fetch_latest_answer, fetch_session_by_tok
 from app.grading import GradingError
 from app.logging_config import redact_session_token
 from app.rendering import render_markdown
+from app.sessions import build_session_url
 from app.tutorials import (
     count_tutorials,
     create_tutorial,
@@ -391,7 +392,7 @@ async def submit_answer(
         return templates.TemplateResponse(request, "answer.html", context, status_code=502)
 
     _log_if_unguarded(request, session, js_active)
-    await record_answer(
+    status = await record_answer(
         pool,
         session_id=session["id"],
         body=answer,
@@ -402,6 +403,18 @@ async def submit_answer(
         reasoning=result.reasoning,
         js_active=js_active,
     )
+
+    # The only place a session reaches a verdict: request_tutorial refuses
+    # a tutorial that would exhaust the budget rather than let it fail the
+    # session. A wrong answer with attempts left stays pending — already
+    # what GitHub shows, so nothing to post.
+    if status != "pending":
+        await request.app.state.status_publisher.publish(
+            repo=session["repo"],
+            head_sha=session["head_sha"],
+            status=status,
+            target_url=build_session_url(settings.grumpy_base_url, token),
+        )
 
     # Post/redirect/get: a page refresh after this must re-fetch the result,
     # not resubmit the answer.

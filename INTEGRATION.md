@@ -1,13 +1,13 @@
 # GitHub Actions Integration
 
-This app is designed to be called from a GitHub Actions workflow as a self-hosted API service. It does not register a GitHub App and does not listen for repository webhooks.
+This app is designed to be called from a GitHub Actions workflow as a self-hosted API service. It does not register a GitHub App and does not listen for repository webhooks. Its one outbound call to GitHub is optional: with `GITHUB_STATUS_TOKEN` set, it posts the verdict as a commit status.
 
 ## How it works
 
 The app exposes two Action-facing endpoints:
 
 - `POST /sessions` — create or reuse a review session for a PR
-- `GET /verdict` — poll whether the review passed or failed
+- `GET /verdict` — read whether the review passed or failed
 
 Both endpoints require a bearer token:
 
@@ -37,7 +37,21 @@ The response looks like:
 }
 ```
 
-Then the workflow polls:
+With `GITHUB_STATUS_TOKEN` set on the server, grumpy then reports the verdict
+on the PR itself, as a `grumpy/verdict` commit status on `head_sha`:
+
+| When | State |
+|---|---|
+| every `POST /sessions` for that head SHA | `pending` (or the verdict, if the session already has one) |
+| a graded answer passes | `success` |
+| a graded answer fails with no attempts left | `failure` |
+
+Its details link is the session URL. **Require `grumpy/verdict` in branch
+protection, not the workflow's job.** A wrong answer with attempts left
+changes nothing: the session and the status both stay pending.
+
+`GET /verdict` returns the same outcome, for a workflow that gates on it
+itself (see [Without a status token](#without-a-status-token)):
 
 ```http
 GET /verdict?repo=owner/name&pr_number=123&head_sha=<head-sha>
@@ -56,6 +70,13 @@ In GitHub repository or organization secrets, set:
 
 - `GRUMPY_BASE_URL` — public base URL of the deployed grumpy app, such as `https://grumpy.example.com`
 - `GRUMPY_TOKEN` — the same value configured as `GRUMPY_TOKEN` on the server
+
+And on the server, `GITHUB_STATUS_TOKEN`: a GitHub token that can write
+commit statuses on every repo this deployment gates. A fine-grained personal
+access token with **Commit statuses: Read and write** on those repos is
+enough; nothing else needs granting. If the status never appears, grumpy's
+log says why: a `404` from GitHub means the token can't see the repo, a
+`403` that it lacks the permission.
 
 ## Example GitHub Actions workflow
 
@@ -76,9 +97,10 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  statuses: read
 
 jobs:
-  grumpy:
+  ask:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,45 +118,52 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
+          # ... POST /sessions with that diff, on every run (it's
+          # idempotent). On a 201, output the session URL for the next step.
 
-          verdict=$(curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
-            --get --data-urlencode "repo=$REPO" \
-            --data-urlencode "pr_number=$PR_NUMBER" \
-            --data-urlencode "head_sha=$HEAD_SHA" \
-            "$GRUMPY_BASE_URL/verdict" | jq -r .status)
+      - name: Comment session link
+        if: steps.grumpy.outputs.session_url
+        # ... comment the session URL on the PR
 
-          if [ "$verdict" = "UNKNOWN" ]; then
-            git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
-            # ... POST /sessions with that diff, then comment the session URL
-            verdict="PENDING"
-          fi
-
-          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
-
-      - name: Gate
+      - name: Check grumpy posted its commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          [ "${{ steps.grumpy.outputs.verdict }}" = "PASSED" ] || exit 1
+          # ... fail if there's no grumpy/verdict status on HEAD_SHA,
+          # i.e. the server isn't configured to post one
 ```
 
-### Polling for the verdict
+The job itself finishes in seconds and goes red only when something is
+broken; it is not the gate. `grumpy/verdict` is.
 
-The shipped workflow polls `GET /verdict` while the status is `PENDING`, for
-up to ten minutes (30 attempts, 20 seconds apart), then gates on whatever it
-last saw.
+### Why the gate is a commit status, not the job
 
-This is a deliberate trade-off, and worth understanding before you change it.
-Without the loop the verdict is captured once at job start, so a developer
-who answers correctly while the job is running still sees a red check until
-somebody notices the PR comment and manually re-runs it. Polling lets the
-check resolve itself, which is the point of a merge gate.
+An Actions job can only end green or red, and what it would be waiting on is
+a human answering on their own schedule. This workflow used to poll
+`GET /verdict` for ten minutes and then fail on whatever it last saw. That
+held a runner for the full ten minutes and left nearly every PR red, since
+authors rarely answer that fast. (Worse, it only commented the session link
+*after* the loop, so they couldn't have.)
 
-The cost is runner time: every second spent waiting on a human is billed as
-Actions minutes, and the job holds a runner for the duration. If that matters
-more to you than self-resolving checks, drop the loop and gate on a single
-reading — verdicts are durable once written, so a re-run picks them up.
+A commit status can stay `pending` for as long as the answer takes, and
+grumpy is the one party that knows the moment it resolves. So the job opens
+the session and posts the link, and grumpy flips the status when the answer
+is graded.
 
-Either way, do not raise the budget much past ten minutes. A developer may
-take hours to answer, and no polling budget survives that.
+`POST /sessions` re-posts the session's current status on every call. If a
+post to GitHub fails (an outage, a revoked token), grumpy logs it and carries
+on, since the verdict is safe in Postgres either way. Re-running the job
+brings GitHub back in line.
+
+### Without a status token
+
+Without `GITHUB_STATUS_TOKEN`, nothing posts `grumpy/verdict`, and the
+reference workflow's last step fails with a message saying so. To gate
+anyway, replace that step with one that reads `GET /verdict` once and fails
+unless it's `PASSED`, and require the job instead. Post the session link
+*before* that step, and expect to re-run the job after answering. Don't
+poll inside the job for the answer: see above.
 
 ### Fork pull requests
 
@@ -148,6 +177,9 @@ The shipped workflow detects this and skips the gate with an explanatory
 notice. Do not reach for `pull_request_target` to "fix" it: that pairs your
 secrets with a checkout of untrusted head code. If you want fork PRs gated,
 run the gate after merging to a trusted branch.
+
+A skipped fork PR also never gets a `grumpy/verdict` status. If that's a
+required check, merging one takes a maintainer bypassing the requirement.
 
 ### The diff range must use three dots
 
@@ -173,6 +205,7 @@ GRUMPY_BASE_URL=https://grumpy.example.com
 GRUMPY_TOKEN=<strong-secret>
 FAKE_GRADER=false
 MODEL_API_KEY=<anthropic-key>
+GITHUB_STATUS_TOKEN=<token with Commit statuses: write>
 ```
 
 ### Public URL requirement
@@ -189,17 +222,17 @@ The app requires full 40-character SHAs for both `head_sha` and `base_sha`.
 
 ## Deployment model
 
-This app is meant to be run as a normal web service, usually behind HTTPS and a reverse proxy or container orchestration layer. The GitHub workflow simply invokes the API and blocks on the verdict.
+This app is meant to be run as a normal web service, usually behind HTTPS and a reverse proxy or container orchestration layer. The GitHub workflow simply invokes the API; grumpy reports the verdict back to GitHub itself.
 
 grumpy has no built-in rate limiting — your reverse proxy or CDN must provide it, along with request body-size limits, before `GRUMPY_BASE_URL` is reachable from the public internet. See [README.md's "Self-hosting: before you make it public"](README.md#self-hosting-before-you-make-it-public) for the full pre-launch checklist (rate limiting, proxy access-log redaction for `/s/{token}`, Anthropic spend limits, and the accepted-risk items).
 
 ## Typical usage pattern
 
-1. Run the server
+1. Run the server, with `GITHUB_STATUS_TOKEN` set
 2. Set GitHub secrets
-3. Add the workflow above to the repo
-4. PRs automatically create review sessions
-5. Reviewers click the URL, answer the question, and the workflow gate resolves
+3. Add the workflow above to the repo, and require `grumpy/verdict` in branch protection
+4. PRs automatically create review sessions, and `grumpy/verdict` shows pending
+5. The PR author clicks the link and answers, and `grumpy/verdict` turns green or red
 
 ## Reference
 

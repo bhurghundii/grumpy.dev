@@ -45,6 +45,8 @@ _UPDATE_STATUS_IF_PENDING_SQL = """
     WHERE id = %(session_id)s AND status = 'pending'
 """
 
+_SELECT_STATUS_SQL = "SELECT status FROM sessions WHERE id = %(session_id)s"
+
 
 async def fetch_session_by_token(pool: AsyncConnectionPool, token: str) -> dict[str, Any] | None:
     async with pool.connection() as conn:
@@ -88,7 +90,14 @@ async def record_answer(
     answer sets 'failed' only once max_session_attempts is exhausted (0
     means never, i.e. unlimited retries); otherwise the session stays
     'pending' so /verdict keeps reporting PENDING and the developer can
-    retry. Returns the resulting status.
+    retry.
+
+    Returns the status the session actually holds afterwards, read back
+    rather than taken from the decision above: if a concurrent request
+    already finalized the session, the guarded UPDATE is a no-op and this
+    request's own decision never landed. app/web.py reports the return
+    value to GitHub, where a losing request's stale "failed" would
+    otherwise overwrite the winner's "passed".
 
     `js_active` (whether the paste guard was running) is stored alongside,
     never consulted here — see migrations/V6__paste_guard.sql.
@@ -123,4 +132,6 @@ async def record_answer(
             await cur.execute(
                 _UPDATE_STATUS_IF_PENDING_SQL, {"status": status, "session_id": session_id}
             )
-    return status
+            await cur.execute(_SELECT_STATUS_SQL, {"session_id": session_id})
+            (stored_status,) = await cur.fetchone()
+    return stored_status
