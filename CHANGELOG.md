@@ -56,6 +56,16 @@ Findings from a pre-release audit, fixed.
 
 **Changed**
 
+- The merge gate is now a `grumpy/verdict` commit status that grumpy posts
+  itself: pending when the session is created, success or failure as soon as
+  the answer is graded. Opt in with the new `GITHUB_STATUS_TOKEN` (and
+  `GITHUB_API_URL` for GitHub Enterprise Server). This replaces the
+  workflow's ten-minute polling loop, which failed nearly every PR: authors
+  rarely answered within ten minutes, and couldn't have, because the session
+  link was only commented after the loop had finished. The workflow's job is
+  now called `ask`. It opens the session, comments the link, checks the
+  status landed and exits in seconds. Point branch protection at
+  `grumpy/verdict` instead of the old `grumpy` job.
 - Python pinned to 3.14 via `.python-version`, matching the Dockerfile, so
   local development and CI stop running a different interpreter from the
   one the image ships. Suite verified green on 3.14.

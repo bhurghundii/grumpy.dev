@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import require_bearer_token
+from app.commit_status import GitHubStatusPublisher, NullStatusPublisher
 from app.config import Settings, get_settings
 from app.db import create_pool
 from app.grading import FakeGrader, RealGrader
@@ -28,7 +29,7 @@ from app.middleware import MaxBodySizeMiddleware
 from app.migrations import run_migrations
 from app.questions import FixedQuestionGenerator
 from app.schemas import CreateSessionRequest
-from app.sessions import create_or_get_session
+from app.sessions import build_session_url, create_or_get_session
 from app.verdict import fetch_verdict
 from app.web import router as web_router
 
@@ -74,6 +75,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.grader = RealGrader(
             api_key=settings.model_api_key, meaniemode=settings.meaniemode
         )
+
+    if settings.github_status_token:
+        app.state.status_publisher = GitHubStatusPublisher(
+            settings.github_status_token, api_url=settings.github_api_url
+        )
+    else:
+        app.state.status_publisher = NullStatusPublisher()
 
     startup_logger.info("startup complete", extra={"outcome": "ok"})
 
@@ -214,9 +222,17 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
         ttl_days=settings.session_ttl_days,
     )
 
-    # Built from the configured base URL, never the request's Host header —
-    # a self-hoster behind a proxy would otherwise get an internal-only URL.
-    session_url = f"{settings.grumpy_base_url.rstrip('/')}/s/{row['token']}"
+    session_url = build_session_url(settings.grumpy_base_url, row["token"])
+
+    # On every call, not only the one that created the session: re-running
+    # the workflow is how a status lost to a GitHub hiccup gets re-posted,
+    # and on a session that's already decided it re-posts that verdict.
+    await app.state.status_publisher.publish(
+        repo=payload.repo,
+        head_sha=payload.head_sha,
+        status=row["status"],
+        target_url=session_url,
+    )
     body = {
         "session_url": session_url,
         "status": row["status"],

@@ -1,9 +1,22 @@
 name: grumpy
 
 # Merge gate: asks whoever opened/updated the PR a question about their own
-# diff, and blocks until it's answered correctly. See README for the phase
-# breakdown; this workflow is the "Action" side of the Action-facing API
-# (POST /sessions, GET /verdict).
+# diff. See README for the phase breakdown; this workflow is the "Action"
+# side of the Action-facing API (POST /sessions).
+#
+# The gate is not this job. It's the `grumpy/verdict` commit status, which
+# the grumpy server posts on the PR's head commit — pending as soon as the
+# session exists, success or failure the moment the answer is graded (needs
+# GITHUB_STATUS_TOKEN on the server; see INTEGRATION.md). Make that the
+# required check. This job only opens the session, links it on the PR and
+# confirms the status landed, so it finishes in seconds and goes red only
+# when something is actually broken.
+#
+# It used to wait for the answer here instead: poll GET /verdict for ten
+# minutes, then fail on whatever it last saw. Authors rarely answer inside
+# ten minutes — and couldn't have here, since the link was only commented
+# after the polling loop finished — so the check was red on nearly every
+# PR, and held a runner for ten minutes getting there.
 #
 # Runs on a GitHub-hosted runner — grumpy is hosted publicly (see the
 # GRUMPY_BASE_URL secret), so any ubuntu-latest runner can reach it.
@@ -14,9 +27,14 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  statuses: read
 
 jobs:
-  grumpy:
+  # Not named `grumpy`, which is what the old blocking job was called: a
+  # repo whose branch protection still requires that check then blocks
+  # merges ("Expected — waiting for status") until it's pointed at
+  # `grumpy/verdict`, rather than quietly letting PRs through ungated.
+  ask:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,16 +44,16 @@ jobs:
       # GitHub does not pass secrets to workflow runs triggered by a PR
       # from a fork, and gives those runs a read-only token. Without this
       # check the curl below sends `Authorization: Bearer ` (empty), takes
-      # a 401, and fails the job on `curl -sf` — presenting "your PR is
-      # blocked" to an outside contributor who did nothing wrong and
-      # cannot fix it. With the polling loop below, it would do so only
-      # after sitting there for ten minutes first.
+      # a 401, and fails the job — presenting "your PR is broken" to an
+      # outside contributor who did nothing wrong and cannot fix it.
       #
       # Deliberately NOT solved with `pull_request_target`: that runs the
       # workflow with secrets against the *base* repo while checking out
       # untrusted head code, a well-known privilege-escalation footgun. A
       # maintainer who wants fork PRs gated should run the gate after
-      # merging to a trusted branch.
+      # merging to a trusted branch. A skipped fork PR never gets a
+      # `grumpy/verdict` status, so if that's a required check, merging one
+      # takes a maintainer bypassing the requirement.
       - name: Check grumpy is configured for this run
         id: config
         env:
@@ -78,69 +96,46 @@ jobs:
         run: |
           set -euo pipefail
 
-          fetch_verdict() {
-            curl -sf -H "Authorization: Bearer $GRUMPY_TOKEN" \
-              --get --data-urlencode "repo=$REPO" \
-              --data-urlencode "pr_number=$PR_NUMBER" \
-              --data-urlencode "head_sha=$HEAD_SHA" \
-              "$GRUMPY_BASE_URL/verdict" | jq -r .status
-          }
+          # Three dots, not two. `git diff A B` is a straight tree-to-tree
+          # comparison, and github.event.pull_request.base.sha is the tip
+          # of the base branch at event time, NOT the merge base. So once
+          # anything lands on the base branch after this PR was opened, a
+          # two-dot diff also contains the *reverse* of those commits —
+          # code the PR author never touched, presented to them as their
+          # own change and to the grader as a claim about this diff.
+          # `A...B` diffs from the merge base, which is what "the whole PR
+          # against its base" actually means.
+          git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
 
-          verdict=$(fetch_verdict)
-          echo "current verdict: $verdict"
+          # Called on every run, not only when no session exists yet. It's
+          # idempotent — a re-run gets the existing session back with a 200
+          # instead of a 201 — and it's also what makes the server re-post
+          # `grumpy/verdict`, so re-running this job is the fix if a status
+          # post to GitHub ever failed.
+          code=$(jq -n \
+            --arg repo "$REPO" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --rawfile diff /tmp/grumpy.diff \
+            '{repo: $repo, pr_number: $pr_number, head_sha: $head_sha, base_sha: $base_sha, diff: $diff}' \
+            | curl -sS -o /tmp/grumpy.json -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $GRUMPY_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data @- \
+                "$GRUMPY_BASE_URL/sessions")
 
-          if [ "$verdict" = "UNKNOWN" ]; then
-            # Three dots, not two. `git diff A B` is a straight
-            # tree-to-tree comparison, and
-            # github.event.pull_request.base.sha is the tip of the base
-            # branch at event time, NOT the merge base. So once anything
-            # lands on the base branch after this PR was opened, a two-dot
-            # diff also contains the *reverse* of those commits — code the
-            # PR author never touched, presented to them as their own
-            # change and to the grader as a claim about this diff.
-            # `A...B` diffs from the merge base, which is what "the whole
-            # PR against its base" actually means.
-            git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
-
-            resp=$(jq -n \
-              --arg repo "$REPO" \
-              --argjson pr_number "$PR_NUMBER" \
-              --arg head_sha "$HEAD_SHA" \
-              --arg base_sha "$BASE_SHA" \
-              --rawfile diff /tmp/grumpy.diff \
-              '{repo: $repo, pr_number: $pr_number, head_sha: $head_sha, base_sha: $base_sha, diff: $diff}' \
-              | curl -sf -X POST \
-                  -H "Authorization: Bearer $GRUMPY_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  --data @- \
-                  "$GRUMPY_BASE_URL/sessions")
-
-            session_url=$(echo "$resp" | jq -r .session_url)
-            echo "session_url=$session_url" >> "$GITHUB_OUTPUT"
-            verdict="PENDING"
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
+            echo "::error title=grumpy::POST /sessions returned HTTP $code: $(cat /tmp/grumpy.json)"
+            exit 1
           fi
 
-          # A PENDING verdict here doesn't mean "fail" — it means nobody's
-          # answered yet, or the answer hasn't landed. Poll instead of
-          # gating on a single stale snapshot: the developer may well
-          # answer while this job is running, and a check that resolves
-          # itself is the point of a merge gate. Without this loop, the
-          # verdict was captured once at job start and the Gate step below
-          # would fail on every run until someone noticed the PR comment
-          # and manually re-ran the job — a correctly answered question
-          # would leave the check red until that manual step happened.
-          # Budget matches INTEGRATION.md's reference workflow: 10 minutes.
-          attempts=30
-          interval=20
-          while [ "$verdict" = "PENDING" ] && [ "$attempts" -gt 0 ]; do
-            sleep "$interval"
-            verdict=$(fetch_verdict)
-            echo "current verdict: $verdict"
-            attempts=$((attempts - 1))
-          done
-
-          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
-          echo "### grumpy: $verdict" >> "$GITHUB_STEP_SUMMARY"
+          # Only a newly created session gets a PR comment, so re-runs
+          # don't pile up duplicate links.
+          if [ "$code" = "201" ]; then
+            echo "session_url=$(jq -r .session_url /tmp/grumpy.json)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "### grumpy: $(jq -r .status /tmp/grumpy.json)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
@@ -156,22 +151,29 @@ jobs:
                 "",
                 `${{ steps.grumpy.outputs.session_url }}`,
                 "",
-                "Answer it, then re-run this check (Checks tab → grumpy → Re-run job)."
+                "Once it's answered, the `grumpy/verdict` check on this PR updates by itself.",
               ].join("\n"),
             });
 
-      - name: Gate
+      # Without GITHUB_STATUS_TOKEN on the server nothing posts
+      # `grumpy/verdict`, so nothing gates the merge — and this job would
+      # go green having gated nothing. Fail with the fix instead. Runs
+      # after the comment, so the question is still answerable meanwhile;
+      # re-run this job once the server is fixed and the status catches up.
+      - name: Check grumpy posted its commit status
+        if: steps.config.outputs.configured == 'true'
         env:
-          CONFIGURED: ${{ steps.config.outputs.configured }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "$CONFIGURED" != "true" ]; then
-            echo "grumpy is not configured for this run — skipping the gate."
-            exit 0
-          fi
+          set -euo pipefail
 
-          verdict="${{ steps.grumpy.outputs.verdict }}"
-          if [ "$verdict" != "PASSED" ]; then
-            echo "grumpy verdict is $verdict, not PASSED — blocking merge." >&2
+          state=$(gh api "repos/$REPO/commits/$HEAD_SHA/status" \
+            --jq '.statuses[] | select(.context == "grumpy/verdict") | .state')
+
+          if [ -z "$state" ]; then
+            echo "::error title=grumpy::No grumpy/verdict status on $HEAD_SHA. Set GITHUB_STATUS_TOKEN on the grumpy server (a token with Commit statuses: write on this repo), then re-run this job. The server logs say why if it is set."
             exit 1
           fi
-          echo "grumpy verdict is PASSED."
+          echo "grumpy/verdict is $state."

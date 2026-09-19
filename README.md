@@ -27,7 +27,7 @@ Yeah but I got a business to run so I am trying my best here.
 2. grumpy generates a session, stores the diff, and returns a URL with a one-time token — `https://your-grumpy/s/<token>`.
 3. The PR author opens the link, reads their own diff, and answers the question in a plain textarea. No login required — the token in the URL is the credential.
 4. grumpy grades the answer with Claude: one call to interpret the diff blind (no answer shown), one call to compare that interpretation against what the developer wrote. Contradicting the diff fails; being terse or incomplete-but-correct passes.
-5. Your workflow polls `GET /verdict` and exits `0` (pass) or `1` (fail), the same as any other required check.
+5. grumpy reports the verdict on the PR as a `grumpy/verdict` commit status: pending until the author answers, then green or red the moment the answer is graded. Require it like any other check. Nothing sits on a runner waiting for a human, and nobody has to re-run anything.
 
 A wrong answer doesn't end the session — the developer sees why they were wrong and gets another attempt, up to a configurable limit. See [Configuration](#configuration) for retries, an optional guided-tutorial mode, and a "meanie mode" that makes the failure reasoning much less polite.
 
@@ -77,6 +77,7 @@ The reference deployment of grumpy runs on [Railway](https://railway.com). Nothi
    | `MODEL_API_KEY` | your Anthropic API key (only needed when `FAKE_GRADER=false`) |
    | `PORT` | `8000` — the container always listens on 8000, so tell Railway to route there |
    | `GRUMPY_BASE_URL` | filled in after the next step |
+   | `GITHUB_STATUS_TOKEN` | a fine-grained GitHub token with *Commit statuses: read and write* on the repos you'll gate — lets grumpy post the `grumpy/verdict` check |
 
 4. **Give it a public URL.** *Settings → Networking → Generate Domain*, with target port `8000`. Then set `GRUMPY_BASE_URL` to that domain including the scheme (e.g. `https://your-app.up.railway.app`) and let it redeploy. grumpy won't boot without it.
 5. **Point Railway's healthcheck at `/healthz`** (*Settings → Deploy → Healthcheck Path*), so a deploy that can't reach Postgres or fails config validation never takes traffic.
@@ -96,6 +97,7 @@ All config is environment variables, validated at startup — grumpy refuses to 
 | `GRUMPY_TOKEN` | yes | — | Shared bearer secret gating `POST /sessions` and `GET /verdict`. Rejected at startup if it's the placeholder or under 20 characters |
 | `FAKE_GRADER` | yes | — | `true` = free/instant grading via a `looks-good` marker string (good for trying grumpy out); `false` = real grading via Claude |
 | `MODEL_API_KEY` | only if `FAKE_GRADER=false` | — | Anthropic API key used by the real grader |
+| `GITHUB_STATUS_TOKEN` | no | unset | GitHub token with *Commit statuses: write* on the gated repos. grumpy uses it to post the `grumpy/verdict` status; unset, it posts nothing and your workflow has to gate on `GET /verdict` itself |
 | `GRUMPY_ALLOWED_REPOS` | no | unset (any repo) | Comma-separated `owner/name` allow-list. Defense-in-depth if `GRUMPY_TOKEN` ever leaks |
 | `MAX_SESSION_ATTEMPTS` | no | `3` | Graded answers + tutorial requests allowed per session before it locks in as failed. `0` = unlimited retries |
 | `ENABLE_TUTORIAL` | no | `false` | Offers a step-by-step, non-graded walkthrough of the diff, with a light comprehension check. Draws on the same `MAX_SESSION_ATTEMPTS` budget as an answer, so the last remaining attempt is reserved for answering and the offer is withdrawn at that point |
@@ -118,7 +120,7 @@ grumpy does ship a few defaults out of the box: interactive API docs (`/docs`, `
 
 (This is the part where you just shove the instructions into an LLM) 
 
-Add a workflow that calls grumpy on every PR and blocks merge on the result. Minimal shape:
+Add a workflow that opens a grumpy session on every PR, then require the `grumpy/verdict` status in branch protection. Minimal shape:
 
 ```yaml
 on:
@@ -137,12 +139,12 @@ jobs:
           GRUMPY_BASE_URL: ${{ secrets.GRUMPY_BASE_URL }}
           GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
         run: |
-          # POST /sessions with the diff, then poll GET /verdict until
-          # PASSED or FAILED. Full script with all the edge cases handled:
-          # see INTEGRATION.md.
+          # POST /sessions with the diff and comment the link on the PR.
+          # grumpy posts the grumpy/verdict status itself. Full script
+          # with all the edge cases handled: see INTEGRATION.md.
 ```
 
-The full working workflow (session creation, polling loop, timeouts) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with).
+The full working workflow (session creation, PR comment, a check that the status actually landed) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.
 
 ## Local development
 

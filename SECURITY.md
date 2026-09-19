@@ -20,7 +20,11 @@ is reused or leaked.
 
 Note that anyone holding a deployment's `GRUMPY_TOKEN` can create sessions
 and read verdicts for *any* `owner/name` string, not just the repos that
-deployment is meant to serve. `GRUMPY_ALLOWED_REPOS` narrows that.
+deployment is meant to serve. `GRUMPY_ALLOWED_REPOS` narrows that. With
+`GITHUB_STATUS_TOKEN` set, the same holder can also get a `grumpy/verdict`
+status onto a commit that has no session yet, in any repo that GitHub token
+can write to, by creating a session for it and answering it. Scope the
+GitHub token to the gated repos only.
 
 ### In scope
 
@@ -44,6 +48,11 @@ them are welcome as design discussion, but they are already known:
   general problem.
 - **Diffs are stored in Postgres in plaintext.** Treat the database as
   containing source code.
+- **Anyone with write access to a repo can set `grumpy/verdict` by hand.**
+  A commit status isn't tied to who posts it, so a repo writer can post
+  `success` under that context themselves. Under the old job-based gate, the
+  same writer could edit the workflow in their own PR to skip it. The gate
+  holds people to answering; it doesn't hold off people who own the repo.
 - **grumpy does not rate-limit itself.** A reverse proxy or CDN in front of it
   must, before `GRUMPY_BASE_URL` is publicly reachable. See
   [README.md](README.md#self-hosting-before-you-make-it-public).
