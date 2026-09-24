@@ -6,6 +6,12 @@ Findings from a pre-release audit, fixed.
 
 **Fixed**
 
+- A session that expired unanswered could never be answered. The expired
+  page said to re-run the check, but the re-run's `POST /sessions` for the
+  same head SHA handed back the same expired session, so `grumpy/verdict`
+  stayed pending until the author pushed a new commit. The re-run now
+  re-issues that session a fresh link and expiry, and the workflow comments
+  it on the PR; answers and the attempt budget carry over.
 - The Action sent the wrong diff. `git diff BASE HEAD` is a two-dot,
   tree-to-tree comparison, and `pull_request.base.sha` is the base branch
   tip at event time rather than the merge base — so once anything landed on

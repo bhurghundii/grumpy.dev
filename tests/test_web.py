@@ -250,6 +250,40 @@ def test_expired_session_returns_410_on_get_and_rejects_post(grumpy_env, databas
     assert _answer_count(database_url, token) == 0
 
 
+def test_rerun_after_expiry_issues_a_fresh_link(grumpy_env, database_url: str) -> None:
+    """The expired page tells the developer to re-run the check. That re-run
+    hits POST /sessions for the same head SHA, so it has to hand back a
+    working link — not the expired session it already had, which would
+    leave the PR stuck at pending until someone pushed a new commit."""
+    repo = f"octo/expired-rerun-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=repo)
+        old_token = _token_from_url(created["session_url"])
+        _expire(database_url, old_token)
+
+        rerun = _create_session(client, grumpy_env.token, repo=repo)
+        new_token = _token_from_url(rerun["session_url"])
+
+        assert new_token != old_token
+        assert client.get(f"/s/{old_token}").status_code == 404
+        assert client.get(f"/s/{new_token}").status_code == 200
+
+        # And an unexpired session is still handed back unchanged.
+        again = client.post(
+            "/sessions",
+            json={
+                "repo": repo,
+                "pr_number": 1,
+                "head_sha": _VALID_SHA,
+                "base_sha": "2" * 40,
+                "diff": "diff --git a/x b/x\n+hello\n",
+            },
+            headers=_headers(grumpy_env.token),
+        )
+        assert again.status_code == 200
+        assert again.json()["session_url"] == rerun["session_url"]
+
+
 def test_unknown_token_returns_generic_404(grumpy_env) -> None:
     unknown_token = secrets.token_urlsafe(32)
     with TestClient(app) as client:
