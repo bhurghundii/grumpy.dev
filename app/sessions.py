@@ -1,10 +1,17 @@
 """Idempotent session creation.
 
 Two concurrent Action runs on the same head SHA are the normal case, not an
-edge case — this uses INSERT ... ON CONFLICT DO NOTHING RETURNING *, falling
-back to a SELECT only when the insert is skipped. Never select-then-insert:
-that has a check-then-act gap and produces duplicate sessions (different
-tokens) for the same SHA under real concurrency.
+edge case — this uses a single INSERT ... ON CONFLICT ... RETURNING *,
+falling back to a SELECT only when the insert is skipped. Never
+select-then-insert: that has a check-then-act gap and produces duplicate
+sessions (different tokens) for the same SHA under real concurrency.
+
+The one conflict that writes is a session that expired while still
+pending: it's re-issued a fresh token and expiry in place (answers and the
+attempt budget carry over). The expired page tells the developer
+to re-run the check, and that re-run lands here with the same head SHA —
+handing back the expired session would leave the PR stuck at pending
+until someone pushed a new commit. The old link stops working.
 
 Why the fallback SELECT is safe: Postgres's conflict check on the unique
 index blocks a second INSERT if another transaction is concurrently
@@ -27,7 +34,9 @@ _INSERT_SQL = """
     VALUES
         (%(repo)s, %(pr_number)s, %(head_sha)s, %(base_sha)s, %(diff)s,
          %(question)s, %(token)s, 'pending', %(expires_at)s)
-    ON CONFLICT (repo, pr_number, head_sha) DO NOTHING
+    ON CONFLICT (repo, pr_number, head_sha) DO UPDATE
+        SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at
+        WHERE sessions.status = 'pending' AND sessions.expires_at < now()
     RETURNING *
 """
 
@@ -55,9 +64,11 @@ async def create_or_get_session(
     token: str,
     ttl_days: int,
 ) -> tuple[dict[str, Any], bool]:
-    """Returns (session_row, created). created is True only if this call's
-    insert won the race; False means a session already existed (created by
-    a prior request or a concurrent one that committed first)."""
+    """Returns (session_row, created). created is True if this call's
+    insert won the race, or re-issued an expired session's link — either
+    way the returned URL is one nobody has been given yet. False means a
+    live session already existed (created by a prior request or a
+    concurrent one that committed first)."""
     expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
     params = {
         "repo": repo,
@@ -83,7 +94,7 @@ async def create_or_get_session(
             )
             row = await cur.fetchone()
             if row is None:
-                # Unreachable in practice: ON CONFLICT DO NOTHING only skips
-                # the insert when a conflicting row already exists.
+                # Unreachable in practice: the conflict clause only skips
+                # the write when a conflicting row already exists.
                 raise RuntimeError("session vanished between insert and select")
             return row, False
