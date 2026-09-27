@@ -159,6 +159,17 @@ async def test_refusal_stop_reason_raises_grading_error() -> None:
 
 
 @pytest.mark.anyio
+async def test_max_tokens_stop_reason_names_the_budget() -> None:
+    """A truncated response is well-formed JSON up to the cut, so without
+    this check the parser blames the model's output rather than the cap it
+    ran into. The message has to say which it was."""
+    truncated = '{"passed": true, "reason'
+    grader = _grader_with(_messages_response(truncated, stop_reason="max_tokens"))
+    with pytest.raises(GradingError, match="token cap"):
+        await grader.grade("diff", "question", "answer")
+
+
+@pytest.mark.anyio
 async def test_empty_interpretation_raises_grading_error() -> None:
     grader = _grader_with("   ")
     with pytest.raises(GradingError):

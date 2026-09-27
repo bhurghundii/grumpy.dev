@@ -50,6 +50,13 @@ Findings from a pre-release audit, fixed.
   recorded nowhere and a truncated response was indistinguishable from an
   expired API key. They now log the traceback against the session's repo
   and head SHA.
+- Tutorial generation could exhaust `max_tokens`. Thinking is on by default
+  on `claude-opus-5` and shares that budget, and a tutorial — up to six
+  steps of a paragraph or two — is much longer than a verdict, so it hit the
+  4096 cap first and came back as truncated JSON. The parser reported that
+  as malformed model output, blaming the model for a budget problem. The cap
+  is 16000 now, and a `max_tokens` stop reason says so instead of failing
+  later as a parse error.
 
 **Added**
 
