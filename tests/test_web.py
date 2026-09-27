@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from app.answers import fetch_session_by_token
+from app.grading import GradingError
 from app.logging_config import JsonFormatter
 from app.main import app
 from app.tutorials import create_tutorial
@@ -1274,4 +1275,48 @@ def test_unguarded_submission_is_logged_without_the_token(grumpy_env) -> None:
     assert len(no_js) == 1, "only the submission without js_active is logged"
     assert "/s/<redacted>/answer" in no_js[0]
     assert repo in no_js[0]
+    assert token not in "\n".join(emitted)
+
+
+def test_failed_tutorial_logs_why(grumpy_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer is told only "please try again", by design — so if this
+    line doesn't carry the cause, nothing does, and a truncated response
+    looks exactly like a dead API key. Captured as above rather than with
+    caplog, for the same reason."""
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    emitted: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(self.format(record))
+
+    class FailingGrader:
+        async def generate_tutorial(self, diff: str, question: str):
+            raise GradingError("model hit the 16000-token cap before finishing")
+
+    repo = f"octo/tutorial-fail-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        created = _create_session(client, grumpy_env.token, repo=repo)
+        token = _token_from_url(created["session_url"])
+        # A wrong answer first: the tutorial is only on offer while the
+        # session is still undecided.
+        client.post(f"/s/{token}/answer", data={"answer": "I have no idea"}, follow_redirects=False)
+
+        real_grader = app.state.grader
+        app.state.grader = FailingGrader()
+        handler = Capture()
+        handler.setFormatter(JsonFormatter())
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            response = client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        finally:
+            root.removeHandler(handler)
+            app.state.grader = real_grader
+
+    assert response.status_code == 502
+    failures = [line for line in emitted if '"outcome": "tutorial_failed"' in line]
+    assert len(failures) == 1
+    assert "16000-token cap" in failures[0], "the cause has to survive into the log"
+    assert repo in failures[0]
     assert token not in "\n".join(emitted)

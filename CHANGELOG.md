@@ -44,6 +44,12 @@ Findings from a pre-release audit, fixed.
   at session creation. Lowered to 400 KB.
 - The pass page hotlinked a copyrighted image from a third-party CDN. It is
   an inline SVG now, which also let the CSP drop `img-src` entirely.
+- A grading or tutorial failure left no trace. The developer is shown a
+  deliberately vague "please try again", and all three `GradingError`
+  handlers discarded the exception without logging it, so the cause was
+  recorded nowhere and a truncated response was indistinguishable from an
+  expired API key. They now log the traceback against the session's repo
+  and head SHA.
 
 **Added**
 

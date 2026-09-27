@@ -190,6 +190,29 @@ def _log_if_unguarded(request: Request, session: dict, js_active: bool) -> None:
     )
 
 
+def _log_grading_failure(session: dict, *, outcome: str) -> None:
+    """A GradingError reaches the developer as a generic "please try again"
+    with no explanation — deliberately, since the cause is a model-side
+    detail they can do nothing about. That makes this the only record of
+    why it happened, so it carries the traceback: without it, a truncated
+    response, a safety refusal and an expired API key all look identical
+    from the outside, and the 502 in the request log says only that
+    something went wrong.
+
+    Call from inside the `except` block — exc_info picks up the exception
+    being handled."""
+    logger.warning(
+        "grading call failed",
+        extra={
+            "repo": session["repo"],
+            "pr_number": session["pr_number"],
+            "head_sha": session["head_sha"],
+            "outcome": outcome,
+        },
+        exc_info=True,
+    )
+
+
 def _answer_context(
     session: dict,
     *,
@@ -382,6 +405,7 @@ async def submit_answer(
     except GradingError:
         # Pending-equivalent error: no answers row, no status change — the
         # developer can resubmit. Must never silently pass or fail.
+        _log_grading_failure(session, outcome="grade_failed")
         context = await _build_answer_context(
             pool,
             settings,
@@ -472,6 +496,7 @@ async def request_tutorial(request: Request, token: str) -> HTMLResponse:
     try:
         result = await grader.generate_tutorial(session["diff"], session["question"])
     except GradingError:
+        _log_grading_failure(session, outcome="tutorial_failed")
         context = await _build_answer_context(
             pool,
             settings,
@@ -552,6 +577,7 @@ async def submit_tutorial_explanation(
             session["diff"], latest_tutorial["breakdown"], explanation
         )
     except GradingError:
+        _log_grading_failure(session, outcome="explanation_grade_failed")
         context = _tutorial_context(
             session,
             latest_tutorial,
