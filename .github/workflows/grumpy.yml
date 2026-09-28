@@ -157,9 +157,11 @@ jobs:
 
       # Without GITHUB_STATUS_TOKEN on the server nothing posts
       # `grumpy/verdict`, so nothing gates the merge — and this job would
-      # go green having gated nothing. Fail with the fix instead. Runs
-      # after the comment, so the question is still answerable meanwhile;
-      # re-run this job once the server is fixed and the status catches up.
+      # go green having gated nothing. Warn with the fix rather than fail:
+      # grumpy is advisory for now, and a red X on every PR reads as "this
+      # change is broken" when the problem is server config. Runs after the
+      # comment, so the question is still answerable meanwhile; re-run this
+      # job once the server is fixed and the status catches up.
       - name: Check grumpy posted its commit status
         if: steps.config.outputs.configured == 'true'
         env:
@@ -173,7 +175,7 @@ jobs:
             --jq '.statuses[] | select(.context == "grumpy/verdict") | .state')
 
           if [ -z "$state" ]; then
-            echo "::error title=grumpy::No grumpy/verdict status on $HEAD_SHA. Set GITHUB_STATUS_TOKEN on the grumpy server (a token with Commit statuses: write on this repo), then re-run this job. The server logs say why if it is set."
-            exit 1
+            echo "::warning title=grumpy::No grumpy/verdict status on $HEAD_SHA. Set GITHUB_STATUS_TOKEN on the grumpy server (a token with Commit statuses: write on this repo), then re-run this job. The server logs say why if it is set."
+            exit 0
           fi
           echo "grumpy/verdict is $state."
