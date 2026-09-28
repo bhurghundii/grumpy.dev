@@ -17,7 +17,7 @@ More and more PRs are AI-generated or AI-assisted, and "LGTM, CI is green" is no
 
 Check out the PRs and see it in action 
 
-### Isn't it ironic the solution to cognitive debt caused by vibe coding is more vibe slop? 
+## Isn't it ironic the solution to cognitive debt caused by vibe coding is more vibe slop? 
 
 Yeah but I got a business to run so I am trying my best here. 
 
@@ -144,7 +144,7 @@ jobs:
           # with all the edge cases handled: see INTEGRATION.md.
 ```
 
-The full working workflow (session creation, PR comment, a check that the status actually landed) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.
+The full working workflow (session creation, PR comment) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.
 
 ## Local development
 
@@ -172,4 +172,3 @@ The answer box blocks pasting, but that's friction, not enforcement: anyone can 
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Security policy: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).

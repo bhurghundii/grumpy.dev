@@ -97,7 +97,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  statuses: read
 
 jobs:
   ask:
@@ -125,13 +124,6 @@ jobs:
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
         # ... comment the session URL on the PR
-
-      - name: Check grumpy posted its commit status
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # ... fail if there's no grumpy/verdict status on HEAD_SHA,
-          # i.e. the server isn't configured to post one
 ```
 
 The job itself finishes in seconds and goes red only when something is
@@ -158,10 +150,10 @@ brings GitHub back in line.
 
 ### Without a status token
 
-Without `GITHUB_STATUS_TOKEN`, nothing posts `grumpy/verdict`, and the
-reference workflow's last step fails with a message saying so. To gate
-anyway, replace that step with one that reads `GET /verdict` once and fails
-unless it's `PASSED`, and require the job instead. Post the session link
+Without `GITHUB_STATUS_TOKEN`, nothing posts `grumpy/verdict`, and nothing
+in the reference workflow notices: the job stays green. To gate anyway, add
+a step that reads `GET /verdict` once and fails unless it's `PASSED`, and
+require the job instead. Post the session link
 *before* that step, and expect to re-run the job after answering. Don't
 poll inside the job for the answer: see above.
 

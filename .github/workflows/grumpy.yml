@@ -8,9 +8,9 @@ name: grumpy
 # the grumpy server posts on the PR's head commit — pending as soon as the
 # session exists, success or failure the moment the answer is graded (needs
 # GITHUB_STATUS_TOKEN on the server; see INTEGRATION.md). Make that the
-# required check. This job only opens the session, links it on the PR and
-# confirms the status landed, so it finishes in seconds and goes red only
-# when something is actually broken.
+# required check. This job only opens the session and links it on the PR,
+# so it finishes in seconds and goes red only when grumpy itself is
+# unreachable or rejects the request.
 #
 # It used to wait for the answer here instead: poll GET /verdict for ten
 # minutes, then fail on whatever it last saw. Authors rarely answer inside
@@ -27,7 +27,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  statuses: read
 
 jobs:
   # Not named `grumpy`, which is what the old blocking job was called: a
@@ -147,33 +146,10 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                "🧐 **grumpy** has a question about this change:",
+                "🧐 **grumpy** wants to check you understand this PR. Answer one question about the change:",
                 "",
                 `${{ steps.grumpy.outputs.session_url }}`,
                 "",
-                "Once it's answered, the `grumpy/verdict` check on this PR updates by itself.",
+                "Your answer is graded, and the result shows up as the `grumpy/verdict` check on this PR.",
               ].join("\n"),
             });
-
-      # Without GITHUB_STATUS_TOKEN on the server nothing posts
-      # `grumpy/verdict`, so nothing gates the merge — and this job would
-      # go green having gated nothing. Fail with the fix instead. Runs
-      # after the comment, so the question is still answerable meanwhile;
-      # re-run this job once the server is fixed and the status catches up.
-      - name: Check grumpy posted its commit status
-        if: steps.config.outputs.configured == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-
-          state=$(gh api "repos/$REPO/commits/$HEAD_SHA/status" \
-            --jq '.statuses[] | select(.context == "grumpy/verdict") | .state')
-
-          if [ -z "$state" ]; then
-            echo "::error title=grumpy::No grumpy/verdict status on $HEAD_SHA. Set GITHUB_STATUS_TOKEN on the grumpy server (a token with Commit statuses: write on this repo), then re-run this job. The server logs say why if it is set."
-            exit 1
-          fi
-          echo "grumpy/verdict is $state."

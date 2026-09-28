@@ -6,6 +6,12 @@ Findings from a pre-release audit, fixed.
 
 **Fixed**
 
+- A session that expired unanswered could never be answered. The expired
+  page said to re-run the check, but the re-run's `POST /sessions` for the
+  same head SHA handed back the same expired session, so `grumpy/verdict`
+  stayed pending until the author pushed a new commit. The re-run now
+  re-issues that session a fresh link and expiry, and the workflow comments
+  it on the PR; answers and the attempt budget carry over.
 - The Action sent the wrong diff. `git diff BASE HEAD` is a two-dot,
   tree-to-tree comparison, and `pull_request.base.sha` is the base branch
   tip at event time rather than the merge base — so once anything landed on
@@ -38,6 +44,19 @@ Findings from a pre-release audit, fixed.
   at session creation. Lowered to 400 KB.
 - The pass page hotlinked a copyrighted image from a third-party CDN. It is
   an inline SVG now, which also let the CSP drop `img-src` entirely.
+- A grading or tutorial failure left no trace. The developer is shown a
+  deliberately vague "please try again", and all three `GradingError`
+  handlers discarded the exception without logging it, so the cause was
+  recorded nowhere and a truncated response was indistinguishable from an
+  expired API key. They now log the traceback against the session's repo
+  and head SHA.
+- Tutorial generation could exhaust `max_tokens`. Thinking is on by default
+  on `claude-opus-5` and shares that budget, and a tutorial — up to six
+  steps of a paragraph or two — is much longer than a verdict, so it hit the
+  4096 cap first and came back as truncated JSON. The parser reported that
+  as malformed model output, blaming the model for a budget problem. The cap
+  is 16000 now, and a `max_tokens` stop reason says so instead of failing
+  later as a parse error.
 
 **Added**
 

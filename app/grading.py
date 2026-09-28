@@ -42,7 +42,15 @@ _API_VERSION = "2023-06-01"
 # Deliberately not disabling thinking: doing so has its own documented
 # failure modes (tool calls emitted as plain text, <thinking> tag leakage
 # into visible output), neither of which this grader needs to risk.
-_MAX_TOKENS = 4096
+#
+# 4096 was too tight for the tutorial, which is by far the longest thing
+# asked of the model here: up to six steps of a paragraph or two each,
+# competing with adaptive thinking for the same budget. A verdict is a
+# sentence and fits either way, so the squeeze showed up only as tutorials
+# failing. 16000 is the documented default for non-streaming requests and
+# sits well inside the 120s client timeout; max_tokens is a ceiling, not a
+# reservation, so raising it costs nothing on responses that don't need it.
+_MAX_TOKENS = 16000
 
 # Transient, self-resolving conditions worth retrying: 429 rate limit, 529
 # overloaded_error, and genuine server-side faults. Deliberately excludes
@@ -535,6 +543,13 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
 def _check_stop_reason(data: dict) -> None:
     if data.get("stop_reason") == "refusal":
         raise GradingError("model declined to respond (safety refusal)")
+    # Checked here rather than left to the parser: a truncated response is
+    # still well-formed JSON right up to where it stops, so the parser
+    # reports it as "model output was not valid JSON" — which reads like the
+    # model misbehaved when the real cause is _MAX_TOKENS being too low for
+    # what was asked. Name the budget instead.
+    if data.get("stop_reason") == "max_tokens":
+        raise GradingError(f"model hit the {_MAX_TOKENS}-token cap before finishing")
 
 
 def _extract_text(data: dict) -> str:
