@@ -172,4 +172,3 @@ The answer box blocks pasting, but that's friction, not enforcement: anyone can 
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Security policy: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
