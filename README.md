@@ -144,7 +144,7 @@ jobs:
           # with all the edge cases handled: see INTEGRATION.md.
 ```
 
-The full working workflow (session creation, PR comment, a check that the status actually landed) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.
+The full working workflow (session creation, PR comment) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.
 
 ## Local development
 
