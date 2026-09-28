@@ -76,12 +76,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             api_key=settings.model_api_key, meaniemode=settings.meaniemode
         )
 
+    # Logged because NullStatusPublisher is silent by design: it posts
+    # nothing and says nothing, so a deployment whose GITHUB_STATUS_TOKEN
+    # never made it into the environment looks exactly like one where
+    # GitHub is rejecting the token — from the outside, and in the log.
+    # The workflow's own error ("No grumpy/verdict status on <sha>") can't
+    # tell them apart either. This line can: no commit_status warnings and
+    # `outcome: disabled` here means the token wasn't loaded; `enabled`
+    # plus a warning means GitHub refused it. Note the token is read once,
+    # at startup — setting it on a running deployment does nothing until
+    # the process restarts, which this line also makes visible.
     if settings.github_status_token:
         app.state.status_publisher = GitHubStatusPublisher(
             settings.github_status_token, api_url=settings.github_api_url
         )
+        startup_logger.info("commit status reporting enabled", extra={"outcome": "enabled"})
     else:
         app.state.status_publisher = NullStatusPublisher()
+        startup_logger.info(
+            "commit status reporting disabled (GITHUB_STATUS_TOKEN unset)",
+            extra={"outcome": "disabled"},
+        )
 
     startup_logger.info("startup complete", extra={"outcome": "ok"})
 

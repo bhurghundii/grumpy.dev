@@ -123,7 +123,7 @@ def _session_token(session_url: str) -> str:
     return session_url.rsplit("/", 1)[-1]
 
 
-def test_blank_status_token_means_nothing_is_posted(grumpy_env, monkeypatch) -> None:
+def test_blank_status_token_means_nothing_is_posted(grumpy_env, monkeypatch, capsys) -> None:
     # Blank rather than deleted: it's what docker-compose's `${VAR:-}`
     # hands the app when .env doesn't set it, and it also keeps a
     # GITHUB_STATUS_TOKEN in a developer's local .env from leaking in.
@@ -131,11 +131,25 @@ def test_blank_status_token_means_nothing_is_posted(grumpy_env, monkeypatch) -> 
     with TestClient(app):
         assert isinstance(app.state.status_publisher, NullStatusPublisher)
 
+    # Read off stdout, not caplog: configure_logging() replaces
+    # root.handlers during startup and removes caplog's handler with them,
+    # and this line is emitted during that same startup, so a handler
+    # attached afterwards is too late to see it either.
+    #
+    # It has to be said out loud because the publisher never will —
+    # NullStatusPublisher posts nothing and logs nothing, so this is the
+    # only thing separating "token wasn't loaded" from "GitHub refused it".
+    assert '"outcome": "disabled"' in capsys.readouterr().out, (
+        "a deployment with no status token has to say so at startup"
+    )
 
-def test_status_token_enables_the_github_publisher(grumpy_env, monkeypatch) -> None:
+
+def test_status_token_enables_the_github_publisher(grumpy_env, monkeypatch, capsys) -> None:
     monkeypatch.setenv("GITHUB_STATUS_TOKEN", "gh-token")
     with TestClient(app):
         assert isinstance(app.state.status_publisher, GitHubStatusPublisher)
+
+    assert '"outcome": "enabled"' in capsys.readouterr().out
 
 
 def test_create_session_posts_pending_and_a_repeat_posts_again(grumpy_env) -> None:
