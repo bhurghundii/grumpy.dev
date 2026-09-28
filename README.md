@@ -17,7 +17,7 @@ More and more PRs are AI-generated or AI-assisted, and "LGTM, CI is green" is no
 
 Check out the PRs and see it in action 
 
-### Isn't it ironic the solution to cognitive debt caused by vibe coding is more vibe slop? 
+## Isn't it ironic the solution to cognitive debt caused by vibe coding is more vibe slop? 
 
 Yeah but I got a business to run so I am trying my best here. 
 
