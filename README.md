@@ -102,6 +102,8 @@ All config is environment variables, validated at startup — grumpy refuses to 
 | `MAX_SESSION_ATTEMPTS` | no | `3` | Graded answers + tutorial requests allowed per session before it locks in as failed. `0` = unlimited retries |
 | `ENABLE_TUTORIAL` | no | `false` | Offers a step-by-step, non-graded walkthrough of the diff, with a light comprehension check. Draws on the same `MAX_SESSION_ATTEMPTS` budget as an answer, so the last remaining attempt is reserved for answering and the offer is withdrawn at that point |
 | `MEANIEMODE` | no | `false` | Failure explanations become sarcastic and merciless instead of professional. Doesn't change pass/fail, only tone |
+| `GRADING_STRICTNESS` | no | `standard` | How hard answers are graded: `lenient` (only wrong answers fail; vague or partial ones pass), `standard`, or `strict` (vague answers, or ones that skip part of what the change does, fail too). Changes pass/fail, unlike `MEANIEMODE` |
+| `GRUMPY_REPO_STRICTNESS` | no | unset | Per-repo overrides of `GRADING_STRICTNESS`, e.g. `octo/scratch=lenient,octo/payments=strict`. Server-side so a PR can't loosen its own gate. Each answer records the level it was graded at |
 | `MAX_DIFF_BYTES` | no | `400000` | Larger diffs are rejected with `413`. Bounded by the model's context window, not by Postgres: at ~3–4 bytes per token, 400 KB is ~100k–130k tokens. Raise it much further and you accept diffs that can never be graded |
 
 ## Self-hosting: before you make it public

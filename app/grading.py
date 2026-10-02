@@ -31,6 +31,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.config import Strictness
+
 MODEL = "claude-opus-5"
 PROMPT_VERSION = "v4"
 
@@ -77,21 +79,56 @@ List the discrete, verifiable claims about what this diff changes, as a \
 short bulleted list. Base every claim strictly on what the diff shows. Do \
 not infer intent beyond what the diff makes visible."""
 
-# Shared by both comparison-prompt tone variants below — the grading rule
-# itself never changes with MEANIEMODE, only how `reasoning` is worded.
-_COMPARISON_GRADING_RULE = """\
+_COMPARISON_PREAMBLE = """\
 You are grading whether a developer's answer demonstrates real \
 understanding of a code change. You are given an independent \
 interpretation of the diff, produced without seeing the answer, so it is \
-not biased toward it.
+not biased toward it."""
 
+# One grading rule per strictness level (GRADING_STRICTNESS and
+# GRUMPY_REPO_STRICTNESS in app/config.py). The rule decides
+# passed/failed; MEANIEMODE never changes it, only how `reasoning` is
+# worded. "standard" is the original rule, word for word, so a deployment
+# that never sets a strictness grades exactly as it did before — and the
+# recorded eval cassettes still describe it.
+#
+# Every level fails an answer that contradicts the diff. What they differ
+# on is how much an answer that's merely incomplete or vague gets away
+# with.
+_GRADING_RULES: dict[Strictness, str] = {
+    "lenient": """\
+Grading rule: only wrong answers fail. This rule decides passed/failed \
+and is not affected by anything below.
+- An answer that states something the diff does not do fails.
+- An answer that is vague, partial, or misses the main point of the change \
+still passes, as long as it is recognisably about this change and nothing \
+in it is wrong.
+- An answer with nothing in it specific to this change (e.g. "fixes \
+stuff", "see the diff") fails, since it has no content to check.
+- Terse phrasing is fine. Poorly written or non-native English phrasing is \
+fine. Wrong content is not.""",
+    "standard": """\
 Grading rule: weight contradictions over missing coverage. This rule \
 decides passed/failed and is not affected by anything below.
 - An answer that states something the diff does not do fails.
 - An answer that is correct but covers less than the full interpretation \
 still passes, unless what it omits is the point of the change.
 - Terse phrasing is fine. Poorly written or non-native English phrasing is \
-fine. Wrong content is not."""
+fine. Wrong content is not.""",
+    "strict": """\
+Grading rule: the answer must be correct and complete. This rule decides \
+passed/failed and is not affected by anything below.
+- An answer that states something the diff does not do fails.
+- An answer that omits the point of the change, or any claim in the \
+interpretation that changes runtime behaviour, fails. Omitting purely \
+cosmetic claims (formatting, comments, renames with no behavioural effect) \
+is fine.
+- Vague statements that would describe many different changes \
+("refactors the handler", "fixes the bug") do not count as covering a \
+claim; the answer must name what specifically changed.
+- Terse phrasing is fine. Poorly written or non-native English phrasing is \
+fine. Wrong, vague, or incomplete content is not.""",
+}
 
 # MEANIEMODE=true: today's scathing "grumpy" roast persona.
 _COMPARISON_TONE_MEAN = """\
@@ -125,9 +162,18 @@ matter-of-fact, not harsh.
 
 Respond with your verdict."""
 
-_COMPARISON_SYSTEM_PROMPT_MEAN = f"{_COMPARISON_GRADING_RULE}\n\n{_COMPARISON_TONE_MEAN}"
-_COMPARISON_SYSTEM_PROMPT_PROFESSIONAL = (
-    f"{_COMPARISON_GRADING_RULE}\n\n{_COMPARISON_TONE_PROFESSIONAL}"
+
+
+def _comparison_system_prompt(*, strictness: Strictness, meaniemode: bool) -> str:
+    tone = _COMPARISON_TONE_MEAN if meaniemode else _COMPARISON_TONE_PROFESSIONAL
+    return f"{_COMPARISON_PREAMBLE}\n\n{_GRADING_RULES[strictness]}\n\n{tone}"
+
+
+# The standard-strictness prompts, which is what every deployment got
+# before strictness existed.
+_COMPARISON_SYSTEM_PROMPT_MEAN = _comparison_system_prompt(strictness="standard", meaniemode=True)
+_COMPARISON_SYSTEM_PROMPT_PROFESSIONAL = _comparison_system_prompt(
+    strictness="standard", meaniemode=False
 )
 
 _TUTORIAL_SYSTEM_PROMPT = """\
@@ -265,7 +311,9 @@ class TutorialBreakdown:
 
 
 class Grader(Protocol):
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult: ...
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult: ...
 
     async def generate_tutorial(self, diff: str, question: str) -> TutorialBreakdown: ...
 
@@ -288,7 +336,10 @@ class FakeGrader:
     MARKER = "looks-good"
     EXPLAIN_MARKER = "i-understand"
 
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult:
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult:
+        # strictness is ignored: the marker is all this grader looks at.
         if self.MARKER in answer:
             return GradeResult(passed=True, reasoning=f"answer contains '{self.MARKER}'")
         return GradeResult(passed=False, reasoning=f"answer is missing '{self.MARKER}'")
@@ -359,11 +410,15 @@ class RealGrader:
         )
         self._meaniemode = meaniemode
 
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult:
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult:
+        """`strictness` only reaches the comparison call. The interpretation
+        is the same whatever the level, since it never sees the answer."""
         try:
             async with self._client_factory() as client:
                 interpretation = await self._interpret(client, diff)
-                return await self._compare(client, interpretation, answer)
+                return await self._compare(client, interpretation, answer, strictness)
         except GradingError:
             raise
         except Exception as exc:  # httpx errors, timeouts, anything unexpected
@@ -382,7 +437,11 @@ class RealGrader:
         return text
 
     async def _compare(
-        self, client: httpx.AsyncClient, interpretation: str, answer: str
+        self,
+        client: httpx.AsyncClient,
+        interpretation: str,
+        answer: str,
+        strictness: Strictness,
     ) -> GradeResult:
         user_content = (
             f"Interpretation of the change:\n{interpretation}\n\n"
@@ -392,10 +451,8 @@ class RealGrader:
         )
         data = await self._call(
             client,
-            system=(
-                _COMPARISON_SYSTEM_PROMPT_MEAN
-                if self._meaniemode
-                else _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
+            system=_comparison_system_prompt(
+                strictness=strictness, meaniemode=self._meaniemode
             ),
             user_content=user_content,
             output_schema=_VERDICT_SCHEMA,

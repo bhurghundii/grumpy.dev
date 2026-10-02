@@ -400,8 +400,11 @@ async def submit_answer(
         return templates.TemplateResponse(request, "answer.html", context, status_code=422)
 
     grader = request.app.state.grader
+    strictness = settings.strictness_for(session["repo"])
     try:
-        result = await grader.grade(session["diff"], session["question"], answer)
+        result = await grader.grade(
+            session["diff"], session["question"], answer, strictness=strictness
+        )
     except GradingError:
         # Pending-equivalent error: no answers row, no status change — the
         # developer can resubmit. Must never silently pass or fail.
@@ -426,6 +429,7 @@ async def submit_answer(
         prompt_version=result.prompt_version,
         reasoning=result.reasoning,
         js_active=js_active,
+        strictness=strictness,
     )
 
     # The only place a session reaches a verdict: request_tutorial refuses

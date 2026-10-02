@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Per-repo grading strictness. `GRADING_STRICTNESS` sets the deployment-wide
+  level (`lenient`, `standard` or `strict`) and `GRUMPY_REPO_STRICTNESS`
+  overrides it per repo, so a scratch repo can accept rough answers while a
+  critical one demands complete ones. `standard` is the existing grading
+  rule, unchanged, so nothing changes unless you set either variable. Each
+  answer records the level it was graded at, in `answers.strictness`.
+
 ## Unreleased — public release preparation
 
 Findings from a pre-release audit, fixed.

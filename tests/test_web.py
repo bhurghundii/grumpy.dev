@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from app.answers import fetch_session_by_token
-from app.grading import GradingError
+from app.grading import FakeGrader, GradingError
 from app.logging_config import JsonFormatter
 from app.main import app
 from app.tutorials import create_tutorial
@@ -1189,6 +1189,50 @@ def test_paste_guard_is_loaded_on_both_pages_with_a_textarea(
     assert answer_page.text.count(_PASTE_GUARD_TAG) == 1
     assert "<textarea" in last_step.text
     assert last_step.text.count(_PASTE_GUARD_TAG) == 1
+
+
+def _answer_strictness(database_url: str, session_token: str) -> list[str | None]:
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT a.strictness FROM answers a
+            JOIN sessions s ON s.id = a.session_id
+            WHERE s.token = %s
+            ORDER BY a.created_at
+            """,
+            (session_token,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def test_answer_is_graded_at_the_repos_strictness(
+    grumpy_env, database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repo's override reaches the grader and is recorded on the answer;
+    a repo without one gets GRADING_STRICTNESS."""
+    lenient_repo = f"octo/lenient-{secrets.token_hex(4)}"
+    other_repo = f"octo/default-{secrets.token_hex(4)}"
+    monkeypatch.setenv("GRADING_STRICTNESS", "strict")
+    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", f"{lenient_repo}=lenient")
+    seen: list[str] = []
+
+    class CapturingGrader(FakeGrader):
+        async def grade(self, diff, question, answer, *, strictness="standard"):
+            seen.append(strictness)
+            return await super().grade(diff, question, answer, strictness=strictness)
+
+    with TestClient(app) as client:
+        app.state.grader = CapturingGrader()
+        tokens = []
+        for repo in (lenient_repo, other_repo):
+            created = _create_session(client, grumpy_env.token, repo=repo)
+            token = _token_from_url(created["session_url"])
+            client.post(f"/s/{token}/answer", data={"answer": "looks-good"}, follow_redirects=False)
+            tokens.append(token)
+
+    assert seen == ["lenient", "strict"]
+    assert _answer_strictness(database_url, tokens[0]) == ["lenient"]
+    assert _answer_strictness(database_url, tokens[1]) == ["strict"]
 
 
 def test_answer_records_whether_the_paste_guard_ran(grumpy_env, database_url: str) -> None:

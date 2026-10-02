@@ -19,6 +19,7 @@ from app import grading
 from app.grading import (
     _COMPARISON_SYSTEM_PROMPT_MEAN,
     _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL,
+    _GRADING_RULES,
     GradingError,
     RealGrader,
 )
@@ -128,6 +129,35 @@ async def test_meaniemode_on_sends_mean_prompt() -> None:
     comparison_body = json.loads(requests[1].content)
     assert comparison_body["system"] == _COMPARISON_SYSTEM_PROMPT_MEAN
     assert comparison_body["system"] != _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
+
+
+@pytest.mark.anyio
+async def test_strictness_defaults_to_standard() -> None:
+    requests: list[httpx.Request] = []
+    grader = _grader_capturing_system(requests, meaniemode=False)
+    await grader.grade("diff", "question", "answer")
+
+    comparison_body = json.loads(requests[1].content)
+    assert _GRADING_RULES["standard"] in comparison_body["system"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strictness", ["lenient", "strict"])
+@pytest.mark.parametrize("meaniemode", [False, True])
+async def test_strictness_selects_the_grading_rule(strictness: str, meaniemode: bool) -> None:
+    """Strictness and MEANIEMODE are independent: one picks the rule, the
+    other the tone, and neither displaces the other."""
+    requests: list[httpx.Request] = []
+    grader = _grader_capturing_system(requests, meaniemode=meaniemode)
+    await grader.grade("diff", "question", "answer", strictness=strictness)
+
+    interpretation_body = json.loads(requests[0].content)
+    comparison_body = json.loads(requests[1].content)
+    assert _GRADING_RULES[strictness] in comparison_body["system"]
+    assert _GRADING_RULES["standard"] not in comparison_body["system"]
+    assert ("scathing" in comparison_body["system"]) is meaniemode
+    # The blind interpretation must not depend on how the answer is graded.
+    assert interpretation_body["system"] == grading._INTERPRETATION_SYSTEM_PROMPT
 
 
 @pytest.mark.anyio

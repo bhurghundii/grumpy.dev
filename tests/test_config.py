@@ -160,3 +160,51 @@ def test_meaniemode_can_be_turned_on(monkeypatch) -> None:
     monkeypatch.setenv("MEANIEMODE", "true")
     settings = Settings()
     assert settings.meaniemode is True
+
+
+def test_strictness_defaults_to_standard_for_every_repo(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    settings = Settings()
+    assert settings.strictness_for("octo/anything") == "standard"
+
+
+def test_grading_strictness_sets_the_default(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("GRADING_STRICTNESS", "strict")
+    settings = Settings()
+    assert settings.strictness_for("octo/anything") == "strict"
+
+
+def test_repo_strictness_overrides_the_default(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("GRADING_STRICTNESS", "strict")
+    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", " octo/scratch = Lenient , octo/core=standard ")
+    settings = Settings()
+    assert settings.strictness_for("octo/scratch") == "lenient"
+    assert settings.strictness_for("octo/core") == "standard"
+    assert settings.strictness_for("octo/other") == "strict"
+
+
+@pytest.mark.parametrize("raw", ["", "  ", ","])
+def test_repo_strictness_blank_string_means_no_overrides(monkeypatch, raw) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", raw)
+    settings = Settings()
+    assert settings.strictness_for("octo/anything") == "standard"
+
+
+@pytest.mark.parametrize(
+    "raw", ["octo/repo=sloppy", "octo/repo", "not-a-repo=lenient", "octo/repo="]
+)
+def test_repo_strictness_rejects_malformed_entry(monkeypatch, raw) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", raw)
+    with pytest.raises(ValidationError, match="GRUMPY_REPO_STRICTNESS"):
+        Settings()
+
+
+def test_grading_strictness_rejects_unknown_level(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("GRADING_STRICTNESS", "sloppy")
+    with pytest.raises(ValidationError, match="grading_strictness"):
+        Settings()
