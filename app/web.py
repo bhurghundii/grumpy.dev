@@ -26,6 +26,7 @@ from app.tutorials import (
     count_tutorials,
     create_tutorial,
     fetch_latest_tutorial,
+    record_check_answer,
     record_tutorial_explanation,
 )
 
@@ -57,11 +58,16 @@ _NO_TUTORIAL_IN_PROGRESS = {
     "heading": "No tutorial in progress",
     "message": "Request a tutorial breakdown first, then explain it back.",
 }
+_NO_SUCH_CHECK = {
+    "heading": "No such check",
+    "message": "That step of the tutorial has no check question to answer.",
+}
 
 # Sentinel for _resolve_step: re-render the walkthrough at its final step,
 # which is the only step carrying the explain-back form — so an error on
 # that form comes back with the form (and what was typed into it) still on
-# screen, rather than dropping the developer at step 1.
+# screen, rather than dropping the developer at step 1. Still subject to
+# the check gate in _tutorial_context, so it can't skip an unanswered check.
 _LAST_STEP = "last"
 
 
@@ -142,6 +148,20 @@ def _resolve_step(raw: str | None, total: int) -> int:
         return min(max(int(raw), 1), total)
     except (TypeError, ValueError):
         return 1
+
+
+def _first_unanswered_check(steps: list[dict], check_answers: dict | None) -> int | None:
+    """The 1-based number of the first step whose check question hasn't
+    been answered yet, or None when every check has been. This is the gate
+    on the walkthrough: nobody gets past a check without writing an answer
+    to it, though what they write is never graded. Steps without a check —
+    every step of a pre-V8 tutorial, or one whose check _parse_step dropped
+    — never gate."""
+    answered = check_answers or {}
+    for number, step in enumerate(steps, start=1):
+        if step.get("check_question") and str(number) not in answered:
+            return number
+    return None
 
 
 def _is_expired(session: dict) -> bool:
@@ -278,6 +298,8 @@ def _tutorial_context(
     step: str | None = None,
     error: str | None = None,
     explanation_body: str = "",
+    check_error: str | None = None,
+    check_draft: str = "",
 ) -> dict:
     """Context for one step of the walkthrough.
 
@@ -289,14 +311,26 @@ def _tutorial_context(
     Rows written before migrations/V5__tutorial_steps.sql have no `steps`,
     so `steps_total` is 0 and the template falls back to rendering
     `breakdown` as one block, exactly as it did before this existed.
+
+    A requested step past the first unanswered check is pulled back to it,
+    so a hand-edited `?step=` can't skip a check. The reference answer is
+    only put in the context once the developer has answered, so it never
+    reaches the page early.
     """
     diff_lines = _classify_diff(session["diff"])
     steps = tutorial.get("steps") or []
+    check_answers = tutorial.get("check_answers") or {}
     total = len(steps)
+    gate = _first_unanswered_check(steps, check_answers)
     number = _resolve_step(step, total)
+    if gate is not None:
+        number = min(number, gate)
     current = steps[number - 1] if total else {}
 
     start, end = current.get("start_line"), current.get("end_line")
+    has_check = bool(current.get("check_question"))
+    written = check_answers.get(str(number)) if has_check else None
+    can_advance = not has_check or written is not None
 
     return {
         "token": session["token"],
@@ -316,7 +350,15 @@ def _tutorial_context(
         "step_range": _format_range(start, end),
         "is_last_step": number >= total,
         "prev_step": number - 1 if number > 1 else None,
-        "next_step": number + 1 if number < total else None,
+        "next_step": number + 1 if number < total and can_advance else None,
+        "has_checks": any(s.get("check_question") for s in steps),
+        "checks_done": gate is None,
+        "check_question": current.get("check_question") if has_check else None,
+        "check_answered": written is not None,
+        "check_body": written["body"] if written else None,
+        "check_answer": current.get("check_answer") if written else None,
+        "check_error": check_error,
+        "check_draft": check_draft,
     }
 
 
@@ -528,6 +570,76 @@ async def request_tutorial(request: Request, token: str) -> HTMLResponse:
     return RedirectResponse(url=f"/s/{token}", status_code=303)
 
 
+@router.post("/s/{token}/tutorial/check")
+async def submit_tutorial_check(
+    request: Request,
+    token: str,
+    step: str = Form(...),
+    answer: str = Form(...),
+    js_active: bool = Form(False),
+) -> HTMLResponse:
+    """Records the developer's own-words answer to one step's check
+    question, then sends them back to that step to see the reference answer
+    beside it. No model call and no attempt spent: the check is never
+    graded, it only has to be attempted before the walkthrough moves on."""
+    pool = request.app.state.pool
+    settings = request.app.state.settings
+    session = await fetch_session_by_token(pool, token)
+
+    if session is None:
+        return templates.TemplateResponse(request, "error.html", _NOT_FOUND, status_code=404)
+
+    if session["status"] in ("passed", "failed"):
+        return templates.TemplateResponse(
+            request, "error.html", _ALREADY_DECIDED, status_code=409
+        )
+
+    if _is_expired(session):
+        return templates.TemplateResponse(request, "error.html", _EXPIRED, status_code=410)
+
+    latest_tutorial = await fetch_latest_tutorial(pool, session["id"])
+    if latest_tutorial is None or latest_tutorial["explanation_body"] is not None:
+        return templates.TemplateResponse(
+            request, "error.html", _NO_TUTORIAL_IN_PROGRESS, status_code=409
+        )
+
+    steps = latest_tutorial.get("steps") or []
+    try:
+        number = int(step)
+    except ValueError:
+        number = 0
+    if not 1 <= number <= len(steps) or not steps[number - 1].get("check_question"):
+        return templates.TemplateResponse(request, "error.html", _NO_SUCH_CHECK, status_code=422)
+
+    if str(number) in (latest_tutorial.get("check_answers") or {}):
+        # Already answered (a double-submit, or a resubmit after the
+        # reveal) — keep the first answer and just show the step again.
+        return RedirectResponse(url=f"/s/{token}?step={number}", status_code=303)
+
+    error = None
+    if not answer.strip():
+        error = "Write an answer before checking it — even a guess."
+    elif len(answer.encode("utf-8")) > settings.max_answer_bytes:
+        # Same byte cap as an answer and an explanation; see
+        # submit_tutorial_explanation.
+        error = f"Answer is too long (max {settings.max_answer_bytes} bytes) — please shorten it."
+    if error:
+        context = _tutorial_context(
+            session, latest_tutorial, step=str(number), check_error=error, check_draft=answer
+        )
+        return templates.TemplateResponse(request, "tutorial.html", context, status_code=422)
+
+    _log_if_unguarded(request, session, js_active)
+    await record_check_answer(
+        pool,
+        tutorial_id=latest_tutorial["id"],
+        step=number,
+        body=answer,
+        js_active=js_active,
+    )
+    return RedirectResponse(url=f"/s/{token}?step={number}", status_code=303)
+
+
 @router.post("/s/{token}/tutorial/explain")
 async def submit_tutorial_explanation(
     request: Request, token: str, explanation: str = Form(...), js_active: bool = Form(False)
@@ -552,6 +664,20 @@ async def submit_tutorial_explanation(
         return templates.TemplateResponse(
             request, "error.html", _NO_TUTORIAL_IN_PROGRESS, status_code=409
         )
+
+    # The form is only shown once every check is answered, but this is a
+    # plain unauthenticated POST — enforce it here too, before any model call.
+    unanswered = _first_unanswered_check(
+        latest_tutorial.get("steps") or [], latest_tutorial.get("check_answers")
+    )
+    if unanswered is not None:
+        context = _tutorial_context(
+            session,
+            latest_tutorial,
+            step=str(unanswered),
+            check_error="Answer this step's check before explaining the whole thing back.",
+        )
+        return templates.TemplateResponse(request, "tutorial.html", context, status_code=422)
 
     if not explanation.strip():
         context = _tutorial_context(

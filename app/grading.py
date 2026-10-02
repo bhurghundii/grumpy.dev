@@ -34,7 +34,7 @@ import httpx
 from app.config import Strictness
 
 MODEL = "claude-opus-5"
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
@@ -203,7 +203,17 @@ short phrase naming what that step covers.
 thing this format exists to avoid; more than six and the reader is \
 clicking, not learning.
 - Do not repeat the line numbers inside `body`; the developer sees the \
-code itself next to it. Keep each `body` to a short paragraph or two."""
+code itself next to it. Keep each `body` to a short paragraph or two.
+
+Every step ends with a check the developer must answer in their own words \
+before they can move on, and only then sees your answer beside theirs:
+- `check_question` must be answerable from that step's lines and `body` \
+alone. Ask why something is done, what happens if an input or condition \
+changes, or what would break if a line were removed — not a yes/no \
+question, and not one answered by repeating a sentence of `body`.
+- It should take one to three sentences to answer.
+- `check_answer` is a short model answer to it, in the same plain \
+teaching tone. Keep it to one to three sentences."""
 
 _EXPLAIN_BACK_SYSTEM_PROMPT = """\
 A developer was given a step-by-step breakdown of a diff after getting a \
@@ -259,8 +269,17 @@ _TUTORIAL_SCHEMA = {
                     "body": {"type": "string"},
                     "start_line": {"type": "integer"},
                     "end_line": {"type": "integer"},
+                    "check_question": {"type": "string"},
+                    "check_answer": {"type": "string"},
                 },
-                "required": ["title", "body", "start_line", "end_line"],
+                "required": [
+                    "title",
+                    "body",
+                    "start_line",
+                    "end_line",
+                    "check_question",
+                    "check_answer",
+                ],
                 "additionalProperties": False,
             },
         }
@@ -290,12 +309,20 @@ class TutorialStep:
     start_line/end_line are None when the model's anchor was unusable and
     _parse_tutorial dropped it: the prose is still worth showing, just
     without a slice.
+
+    check_question/check_answer are the step's write-then-reveal check:
+    the developer answers in their own words before Next appears, then sees
+    check_answer beside what they wrote. Both or neither — a question with
+    no reference answer has nothing to reveal, so _parse_step drops the
+    pair rather than half of it.
     """
 
     title: str
     body: str
     start_line: int | None = None
     end_line: int | None = None
+    check_question: str | None = None
+    check_answer: str | None = None
 
 
 @dataclass
@@ -367,6 +394,8 @@ class FakeGrader:
                     ),
                     start_line=start,
                     end_line=min(end, total),
+                    check_question=f"FAKE check {n}",
+                    check_answer=f"FAKE reference answer {n}",
                 )
             )
         return TutorialBreakdown(text=_flatten_steps(steps), steps=steps)
@@ -658,7 +687,20 @@ def _parse_step(raw: Any, line_count: int) -> TutorialStep | None:
     else:
         start = end = None
 
-    return TutorialStep(title=title.strip(), body=body.strip(), start_line=start, end_line=end)
+    question, answer = raw.get("check_question"), raw.get("check_answer")
+    if not (isinstance(question, str) and question.strip()) or not (
+        isinstance(answer, str) and answer.strip()
+    ):
+        question = answer = None
+
+    return TutorialStep(
+        title=title.strip(),
+        body=body.strip(),
+        start_line=start,
+        end_line=end,
+        check_question=question.strip() if question else None,
+        check_answer=answer.strip() if answer else None,
+    )
 
 
 def _parse_tutorial(text: str, line_count: int) -> list[TutorialStep]:

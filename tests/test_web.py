@@ -170,6 +170,31 @@ def _set_tutorial_reasoning(database_url: str, token: str, reasoning: str) -> No
         conn.commit()
 
 
+def _check_answers(database_url: str, token: str) -> dict | None:
+    with psycopg.connect(database_url) as conn:
+        row = conn.execute(
+            "SELECT check_answers FROM tutorials"
+            " WHERE session_id = (SELECT id FROM sessions WHERE token = %s)"
+            " ORDER BY created_at DESC LIMIT 1",
+            (token,),
+        ).fetchone()
+    return row[0]
+
+
+def _answer_all_checks(client: TestClient, token: str) -> None:
+    """Answers every step's check question in order, which is what the
+    explain-back form waits on. FakeGrader gives every step a check; the
+    first step without one ends the walk (422, no such check)."""
+    for step in range(1, 7):
+        response = client.post(
+            f"/s/{token}/tutorial/check",
+            data={"step": str(step), "answer": f"my own words for step {step}"},
+            follow_redirects=False,
+        )
+        if response.status_code != 303:
+            break
+
+
 def test_full_path_pass(grumpy_env) -> None:
     repo = f"octo/pass-{secrets.token_hex(4)}"
     with TestClient(app) as client:
@@ -447,19 +472,34 @@ def test_tutorial_full_path_updates_form_with_feedback_and_allows_retry(
         request_tutorial = client.post(f"/s/{token}/tutorial", follow_redirects=False)
         assert request_tutorial.status_code == 303
 
-        # The walkthrough opens on step 1, which offers Next but not the
-        # explain-back form — that lives on the final step.
+        # The walkthrough opens on step 1 with its check question. Next
+        # stays hidden until the check is answered, and the explain-back
+        # form lives on the final step.
         tutorial_page = client.get(f"/s/{token}")
         assert tutorial_page.status_code == 200
         assert "FAKE step-by-step breakdown" in tutorial_page.text
         assert "Step 1 of 3" in tutorial_page.text
-        assert "?step=2" in tutorial_page.text
+        assert "FAKE check 1" in tutorial_page.text
+        assert "?step=2" not in tutorial_page.text
         assert "Explain it back" not in tutorial_page.text
 
-        last_step = client.get(f"/s/{token}", params={"step": 3})
-        assert last_step.status_code == 200
-        assert "Step 3 of 3" in last_step.text
-        assert "Explain it back" in last_step.text
+        for step in (1, 2, 3):
+            checked = client.post(
+                f"/s/{token}/tutorial/check",
+                data={"step": str(step), "answer": f"my take on step {step}"},
+                follow_redirects=False,
+            )
+            assert checked.status_code == 303
+            assert checked.headers["location"] == f"/s/{token}?step={step}"
+            revealed = client.get(f"/s/{token}", params={"step": step})
+            assert f"Step {step} of 3" in revealed.text
+            assert f"my take on step {step}" in revealed.text
+            assert f"FAKE reference answer {step}" in revealed.text
+            if step < 3:
+                assert f'href="?step={step + 1}"' in revealed.text
+                assert "Explain it back" not in revealed.text
+            else:
+                assert "Explain it back" in revealed.text
 
         explain = client.post(
             f"/s/{token}/tutorial/explain",
@@ -621,6 +661,212 @@ def test_tutorial_step_body_markdown_is_rendered_and_sanitized(
     assert "<script" not in _without_paste_guard(page.text)
 
 
+# --- Per-step checks (migrations/V8__tutorial_check_answers.sql). Each step
+# asks a question the developer answers in their own words before Next
+# appears; then the reference answer is revealed beside theirs. Never
+# graded, so wrong answers don't block — only not attempting does.
+
+
+def _seed_fake_walkthrough(client: TestClient, env_token: str, repo: str) -> str:
+    """A tutorial straight from FakeGrader: three steps, each with a check."""
+    created = _create_session(client, env_token, repo=repo, diff=_WALKTHROUGH_DIFF)
+    token = _token_from_url(created["session_url"])
+    client.post(f"/s/{token}/answer", data={"answer": "I have no idea"}, follow_redirects=False)
+    client.post(f"/s/{token}/tutorial", follow_redirects=False)
+    return token
+
+
+def test_tutorial_check_hides_reference_and_next_until_answered(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-check-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        before = client.get(f"/s/{token}")
+        checked = client.post(
+            f"/s/{token}/tutorial/check",
+            data={"step": "1", "answer": "it splits the diff", "js_active": "1"},
+            follow_redirects=False,
+        )
+        after = client.get(f"/s/{token}", params={"step": 1})
+
+    assert "FAKE check 1" in before.text
+    assert "Check my answer" in before.text
+    assert "FAKE reference answer 1" not in before.text
+    assert 'href="?step=2"' not in before.text
+    assert "Skip to the end" not in before.text  # would only bounce off the gate
+
+    assert checked.status_code == 303
+    assert "it splits the diff" in after.text
+    assert "FAKE reference answer 1" in after.text
+    assert "Check my answer" not in after.text
+    assert 'href="?step=2"' in after.text
+
+    assert _check_answers(database_url, token) == {
+        "1": {"body": "it splits the diff", "js_active": True}
+    }
+
+
+@pytest.mark.parametrize("raw", ["2", "3", "999", "last"])
+def test_tutorial_step_past_an_unanswered_check_lands_on_that_check(
+    grumpy_env, monkeypatch, raw: str
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-gate-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        page = client.get(f"/s/{token}", params={"step": raw})
+
+    assert page.status_code == 200
+    assert "Step 1 of 3" in page.text
+    assert "FAKE reference answer" not in page.text
+
+
+def test_tutorial_check_rejects_empty_and_oversized_answers(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    monkeypatch.setenv("MAX_ANSWER_BYTES", "64")
+    repo = f"octo/tutorial-check-bad-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        empty = client.post(
+            f"/s/{token}/tutorial/check", data={"step": "1", "answer": "   "}, follow_redirects=False
+        )
+        too_long = client.post(
+            f"/s/{token}/tutorial/check",
+            data={"step": "1", "answer": "x" * 65},
+            follow_redirects=False,
+        )
+
+    assert empty.status_code == 422
+    assert "Write an answer" in empty.text
+    assert too_long.status_code == 422
+    assert "too long" in too_long.text
+    assert "x" * 65 in too_long.text  # draft kept
+    assert _check_answers(database_url, token) is None
+
+
+@pytest.mark.parametrize("step", ["0", "4", "abc"])
+def test_tutorial_check_for_a_step_without_one_returns_422(
+    grumpy_env, monkeypatch, step: str
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-check-nostep-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        response = client.post(
+            f"/s/{token}/tutorial/check",
+            data={"step": step, "answer": "hello"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 422
+    assert "No such check" in response.text
+
+
+def test_tutorial_check_answer_is_write_once(grumpy_env, database_url: str, monkeypatch) -> None:
+    """After the reveal, a second answer would just be the reference copied."""
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-check-once-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        for answer in ("first try", "FAKE reference answer 1"):
+            response = client.post(
+                f"/s/{token}/tutorial/check",
+                data={"step": "1", "answer": answer},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+    assert _check_answers(database_url, token)["1"]["body"] == "first try"
+
+
+def test_tutorial_explain_back_refused_until_every_check_is_answered(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-check-explain-{secrets.token_hex(4)}"
+    calls: list[str] = []
+    original = FakeGrader.grade_explanation
+
+    async def spy(self, diff, breakdown, explanation):
+        calls.append(explanation)
+        return await original(self, diff, breakdown, explanation)
+
+    monkeypatch.setattr(FakeGrader, "grade_explanation", spy)
+    with TestClient(app) as client:
+        token = _seed_fake_walkthrough(client, grumpy_env.token, repo)
+        client.post(
+            f"/s/{token}/tutorial/check", data={"step": "1", "answer": "a"}, follow_redirects=False
+        )
+        response = client.post(
+            f"/s/{token}/tutorial/explain",
+            data={"explanation": "i-understand"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 422
+    assert "Step 2 of 3" in response.text
+    assert "Answer this step" in response.text
+    assert calls == []
+
+
+def test_tutorial_check_text_is_escaped_and_reference_is_sanitized(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    """The developer's answer is shown as plain text; the reference answer
+    is model output rendered as markdown, so scripts must not survive
+    either path."""
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-check-xss-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_walkthrough(client, database_url, grumpy_env.token, repo)
+        _set_tutorial_steps(
+            database_url,
+            token,
+            [
+                {
+                    **_WALKTHROUGH_STEPS[0],
+                    "check_question": "Why <b>here</b>?",
+                    "check_answer": "Because **locks**. <script>alert(1)</script>",
+                },
+                _WALKTHROUGH_STEPS[1],
+            ],
+        )
+        client.post(
+            f"/s/{token}/tutorial/check",
+            data={"step": "1", "answer": "<script>alert(2)</script> mine"},
+            follow_redirects=False,
+        )
+        page = client.get(f"/s/{token}", params={"step": 1})
+
+    html = _without_paste_guard(page.text)
+    assert "<script" not in html
+    assert "&lt;script&gt;alert(2)&lt;/script&gt; mine" in html
+    assert "Why &lt;b&gt;here&lt;/b&gt;?" in html
+    assert "<strong>locks</strong>" in html
+
+
+def test_tutorial_steps_without_checks_page_freely(
+    grumpy_env, database_url: str, monkeypatch
+) -> None:
+    """A pre-V8 tutorial has no check questions, so nothing gates it."""
+    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
+    repo = f"octo/tutorial-nocheck-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _seed_walkthrough(client, database_url, grumpy_env.token, repo)
+        first = client.get(f"/s/{token}")
+        last = client.get(f"/s/{token}", params={"step": "last"})
+
+    assert 'href="?step=2"' in first.text
+    assert "Skip to the end" in first.text
+    assert "Check my answer" not in first.text
+    assert "Step 2 of 2" in last.text
+    assert "Explain it back" in last.text
+
+
 def test_tutorial_explain_back_failing_still_unlocks_retry(grumpy_env, monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_TUTORIAL", "true")
     repo = f"octo/tutorial-fail-{secrets.token_hex(4)}"
@@ -630,6 +876,7 @@ def test_tutorial_explain_back_failing_still_unlocks_retry(grumpy_env, monkeypat
 
         client.post(f"/s/{token}/answer", data={"answer": "I have no idea"}, follow_redirects=False)
         client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        _answer_all_checks(client, token)
 
         explain = client.post(
             f"/s/{token}/tutorial/explain",
@@ -989,6 +1236,7 @@ def test_tutorial_feedback_markdown_is_rendered_and_sanitized(
 
         client.post(f"/s/{token}/answer", data={"answer": "I have no idea"}, follow_redirects=False)
         client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        _answer_all_checks(client, token)
         client.post(
             f"/s/{token}/tutorial/explain",
             data={"explanation": "i-understand what this diff does now"},
@@ -1270,12 +1518,14 @@ def test_tutorial_explanation_records_whether_the_paste_guard_ran(
         token = _token_from_url(created["session_url"])
 
         client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        _answer_all_checks(client, token)
         client.post(
             f"/s/{token}/tutorial/explain",
             data={"explanation": "i-understand", "js_active": "1"},
             follow_redirects=False,
         )
         client.post(f"/s/{token}/tutorial", follow_redirects=False)
+        _answer_all_checks(client, token)
         unguarded = client.post(
             f"/s/{token}/tutorial/explain",
             data={"explanation": "i-understand"},

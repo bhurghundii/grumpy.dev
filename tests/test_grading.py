@@ -338,6 +338,64 @@ async def test_generate_tutorial_keeps_step_whose_anchor_is_unusable() -> None:
 
 
 @pytest.mark.anyio
+async def test_generate_tutorial_schema_requires_a_check_per_step() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _messages_response(_steps_response(_step(), _step()))
+
+    grader = RealGrader(
+        api_key="test-key",
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await grader.generate_tutorial(_DIFF, "question")
+
+    schema = json.loads(requests[0].content)["output_config"]["format"]["schema"]
+    step = schema["properties"]["steps"]["items"]
+    assert {"check_question", "check_answer"} <= set(step["required"])
+
+
+@pytest.mark.anyio
+async def test_generate_tutorial_parses_step_checks() -> None:
+    grader = _grader_with(
+        _steps_response(
+            _step(check_question=" Why lock here? ", check_answer=" So two charges can't race. "),
+            _step(),
+        )
+    )
+    breakdown = await grader.generate_tutorial(_DIFF, "question")
+
+    assert breakdown.steps[0].check_question == "Why lock here?"
+    assert breakdown.steps[0].check_answer == "So two charges can't race."
+    assert breakdown.steps[1].check_question is None
+    # The check is not part of the prose grade_explanation is handed.
+    assert "Why lock here?" not in breakdown.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "check",
+    [
+        {"check_question": "Why?"},
+        {"check_answer": "Because."},
+        {"check_question": "Why?", "check_answer": "  "},
+        {"check_question": 7, "check_answer": "Because."},
+    ],
+)
+async def test_generate_tutorial_drops_a_half_check_but_keeps_the_step(check: dict) -> None:
+    """A question with no reference answer has nothing to reveal, so the
+    pair goes, and the step's prose stays."""
+    grader = _grader_with(_steps_response(_step(**check), _step()))
+    breakdown = await grader.generate_tutorial(_DIFF, "question")
+
+    assert len(breakdown.steps) == 2
+    assert breakdown.steps[0].check_question is None
+    assert breakdown.steps[0].check_answer is None
+    assert breakdown.steps[0].body == "What it does."
+
+
+@pytest.mark.anyio
 async def test_generate_tutorial_drops_steps_missing_prose() -> None:
     grader = _grader_with(_steps_response(_step(), {"start_line": 1, "end_line": 2}, _step(body="  ")))
     breakdown = await grader.generate_tutorial(_DIFF, "question")
