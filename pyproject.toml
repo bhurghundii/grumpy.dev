@@ -25,7 +25,7 @@ dependencies = [
     # attacker-controlled input to the grading model — so `nh3` (the
     # maintained, Rust-backed successor to `bleach`) always runs over the
     # result before it's marked safe for Jinja2.
-    "markdown>=3.10.3",
+    "markdown>=3.11",
     "nh3>=0.3.7",
 ]
 
