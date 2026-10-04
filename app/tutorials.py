@@ -43,6 +43,20 @@ _UPDATE_EXPLANATION_SQL = """
     WHERE id = %(tutorial_id)s
 """
 
+# Write-once per step: the NOT ? guard leaves an existing answer alone, so
+# a double-submit or a second POST after the reveal is a no-op. Scoped to
+# an in-progress tutorial so an explained one can't be written to.
+_RECORD_CHECK_ANSWER_SQL = """
+    UPDATE tutorials
+    SET check_answers = COALESCE(check_answers, '{}'::jsonb) || jsonb_build_object(
+        %(step)s::text,
+        jsonb_build_object('body', %(body)s::text, 'js_active', %(js_active)s::boolean)
+    )
+    WHERE id = %(tutorial_id)s
+      AND explanation_body IS NULL
+      AND NOT (COALESCE(check_answers, '{}'::jsonb) ? %(step)s::text)
+"""
+
 # Only ever transitions a session out of 'pending' — see
 # app/answers.py:_UPDATE_STATUS_IF_PENDING_SQL for the same guard and why.
 _UPDATE_STATUS_IF_PENDING_SQL = """
@@ -152,4 +166,23 @@ async def record_tutorial_explanation(
                     "prompt_version": prompt_version,
                     "js_active": js_active,
                 },
+            )
+
+
+async def record_check_answer(
+    pool: AsyncConnectionPool,
+    *,
+    tutorial_id: UUID,
+    step: int,
+    body: str,
+    js_active: bool | None = None,
+) -> None:
+    """Stores the developer's answer to one step's check question. Never
+    graded and never touches sessions.status or the attempt budget — see
+    migrations/V8__tutorial_check_answers.sql."""
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _RECORD_CHECK_ANSWER_SQL,
+                {"tutorial_id": tutorial_id, "step": step, "body": body, "js_active": js_active},
             )

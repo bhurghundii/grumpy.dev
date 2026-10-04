@@ -19,6 +19,7 @@ from app import grading
 from app.grading import (
     _COMPARISON_SYSTEM_PROMPT_MEAN,
     _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL,
+    _GRADING_RULES,
     GradingError,
     RealGrader,
 )
@@ -128,6 +129,35 @@ async def test_meaniemode_on_sends_mean_prompt() -> None:
     comparison_body = json.loads(requests[1].content)
     assert comparison_body["system"] == _COMPARISON_SYSTEM_PROMPT_MEAN
     assert comparison_body["system"] != _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
+
+
+@pytest.mark.anyio
+async def test_strictness_defaults_to_standard() -> None:
+    requests: list[httpx.Request] = []
+    grader = _grader_capturing_system(requests, meaniemode=False)
+    await grader.grade("diff", "question", "answer")
+
+    comparison_body = json.loads(requests[1].content)
+    assert _GRADING_RULES["standard"] in comparison_body["system"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strictness", ["lenient", "strict"])
+@pytest.mark.parametrize("meaniemode", [False, True])
+async def test_strictness_selects_the_grading_rule(strictness: str, meaniemode: bool) -> None:
+    """Strictness and MEANIEMODE are independent: one picks the rule, the
+    other the tone, and neither displaces the other."""
+    requests: list[httpx.Request] = []
+    grader = _grader_capturing_system(requests, meaniemode=meaniemode)
+    await grader.grade("diff", "question", "answer", strictness=strictness)
+
+    interpretation_body = json.loads(requests[0].content)
+    comparison_body = json.loads(requests[1].content)
+    assert _GRADING_RULES[strictness] in comparison_body["system"]
+    assert _GRADING_RULES["standard"] not in comparison_body["system"]
+    assert ("scathing" in comparison_body["system"]) is meaniemode
+    # The blind interpretation must not depend on how the answer is graded.
+    assert interpretation_body["system"] == grading._INTERPRETATION_SYSTEM_PROMPT
 
 
 @pytest.mark.anyio
@@ -305,6 +335,64 @@ async def test_generate_tutorial_keeps_step_whose_anchor_is_unusable() -> None:
     assert breakdown.steps[0].body == "What it does."
     # Wholly past the end of the diff — clamping can't rescue it either.
     assert breakdown.steps[1].start_line is None
+
+
+@pytest.mark.anyio
+async def test_generate_tutorial_schema_requires_a_check_per_step() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _messages_response(_steps_response(_step(), _step()))
+
+    grader = RealGrader(
+        api_key="test-key",
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await grader.generate_tutorial(_DIFF, "question")
+
+    schema = json.loads(requests[0].content)["output_config"]["format"]["schema"]
+    step = schema["properties"]["steps"]["items"]
+    assert {"check_question", "check_answer"} <= set(step["required"])
+
+
+@pytest.mark.anyio
+async def test_generate_tutorial_parses_step_checks() -> None:
+    grader = _grader_with(
+        _steps_response(
+            _step(check_question=" Why lock here? ", check_answer=" So two charges can't race. "),
+            _step(),
+        )
+    )
+    breakdown = await grader.generate_tutorial(_DIFF, "question")
+
+    assert breakdown.steps[0].check_question == "Why lock here?"
+    assert breakdown.steps[0].check_answer == "So two charges can't race."
+    assert breakdown.steps[1].check_question is None
+    # The check is not part of the prose grade_explanation is handed.
+    assert "Why lock here?" not in breakdown.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "check",
+    [
+        {"check_question": "Why?"},
+        {"check_answer": "Because."},
+        {"check_question": "Why?", "check_answer": "  "},
+        {"check_question": 7, "check_answer": "Because."},
+    ],
+)
+async def test_generate_tutorial_drops_a_half_check_but_keeps_the_step(check: dict) -> None:
+    """A question with no reference answer has nothing to reveal, so the
+    pair goes, and the step's prose stays."""
+    grader = _grader_with(_steps_response(_step(**check), _step()))
+    breakdown = await grader.generate_tutorial(_DIFF, "question")
+
+    assert len(breakdown.steps) == 2
+    assert breakdown.steps[0].check_question is None
+    assert breakdown.steps[0].check_answer is None
+    assert breakdown.steps[0].body == "What it does."
 
 
 @pytest.mark.anyio

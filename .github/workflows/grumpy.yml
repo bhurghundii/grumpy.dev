@@ -9,8 +9,9 @@ name: grumpy
 # session exists, success or failure the moment the answer is graded (needs
 # GITHUB_STATUS_TOKEN on the server; see INTEGRATION.md). Make that the
 # required check. This job only opens the session and links it on the PR,
-# so it finishes in seconds and goes red only when grumpy itself is
-# unreachable or rejects the request.
+# so it finishes in seconds and never goes red: if grumpy is unreachable or
+# rejects the request, it says so as a warning and still passes. A grumpy
+# outage should not read as "your PR is broken".
 #
 # It used to wait for the answer here instead: poll GET /verdict for ten
 # minutes, then fail on whatever it last saw. Authors rarely answer inside
@@ -33,7 +34,9 @@ jobs:
   # repo whose branch protection still requires that check then blocks
   # merges ("Expected — waiting for status") until it's pointed at
   # `grumpy/verdict`, rather than quietly letting PRs through ungated.
-  ask:
+  # Was `ask` until it became non-blocking; the same reasoning applies to a
+  # protection rule still requiring `ask`.
+  grill:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -122,11 +125,15 @@ jobs:
                 -H "Authorization: Bearer $GRUMPY_TOKEN" \
                 -H "Content-Type: application/json" \
                 --data @- \
-                "$GRUMPY_BASE_URL/sessions")
+                "$GRUMPY_BASE_URL/sessions" || true)
 
+          # Non-blocking: a failure here is grumpy's problem, not the PR's,
+          # so warn and pass. `|| true` on curl keeps `set -e` from failing
+          # the step when the server can't be reached at all (code 000).
           if [ "$code" != "200" ] && [ "$code" != "201" ]; then
-            echo "::error title=grumpy::POST /sessions returned HTTP $code: $(cat /tmp/grumpy.json)"
-            exit 1
+            echo "::warning title=grumpy unavailable::POST /sessions returned HTTP $code: $(cat /tmp/grumpy.json 2>/dev/null)"
+            echo "### grumpy: UNAVAILABLE (HTTP $code), not blocking" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
           # Only a newly created session gets a PR comment, so re-runs
@@ -138,6 +145,9 @@ jobs:
 
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
+        # A failed comment (rate limit, token scope) loses the link but must
+        # not turn the check red; the session still exists.
+        continue-on-error: true
         uses: actions/github-script@v9
         with:
           script: |

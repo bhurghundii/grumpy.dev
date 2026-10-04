@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal, get_args
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +38,12 @@ MIN_GRUMPY_TOKEN_LENGTH = 20
 # startup, before anything else in the app exists to import from.
 _REPO_SHAPE_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
+# How hard the comparison call grades an answer — one level per rule in
+# app/grading.py's _GRADING_RULES, which imports this. Defined here so
+# app.config keeps no intra-app imports (see _REPO_SHAPE_RE above).
+Strictness = Literal["lenient", "standard", "strict"]
+_STRICTNESS_LEVELS: tuple[str, ...] = get_args(Strictness)
+
 
 def _parse_allowed_repos(raw: str | None) -> frozenset[str] | None:
     """None means unrestricted (any repo permitted). A blank/whitespace/
@@ -50,6 +57,17 @@ def _parse_allowed_repos(raw: str | None) -> frozenset[str] | None:
         return None
     repos = frozenset(r.strip() for r in raw.split(",") if r.strip())
     return repos or None
+
+
+def _parse_repo_strictness(raw: str | None) -> dict[str, str]:
+    """'owner/a=lenient,owner/b=strict' -> {'owner/a': 'lenient', ...}.
+    Blank or unset is an empty mapping, for the same docker-compose reason
+    as _parse_allowed_repos. Entries are only split and trimmed here;
+    _validate_repo_strictness rejects malformed ones at startup."""
+    if raw is None:
+        return {}
+    pairs = (entry.partition("=") for entry in raw.split(",") if entry.strip())
+    return {repo.strip(): level.strip().lower() for repo, _, level in pairs}
 
 
 class Settings(BaseSettings):
@@ -182,6 +200,27 @@ class Settings(BaseSettings):
     # with zero config; opt into the roast explicitly with MEANIEMODE=true.
     meaniemode: bool = False
 
+    # How strictly an answer is graded, for any repo not named in
+    # GRUMPY_REPO_STRICTNESS below. 'standard' is the original grading
+    # rule; 'lenient' fails only answers that are wrong; 'strict' also
+    # fails answers that are vague or skip a significant part of the
+    # change. Changes pass/fail, not tone — that's MEANIEMODE.
+    grading_strictness: Strictness = "standard"
+
+    # Per-repo overrides of GRADING_STRICTNESS, e.g.
+    # 'octo/scratch=lenient,octo/payments=strict'. Server-side on purpose:
+    # a knob in the workflow file would let a PR loosen its own gate.
+    # Resolved when an answer is graded, not when the session is created,
+    # so a change applies to sessions already open; each answer row
+    # records the level it was actually graded at.
+    grumpy_repo_strictness: str | None = Field(
+        default=None,
+        description=(
+            "Optional comma-separated 'owner/name=level' overrides of "
+            "GRADING_STRICTNESS, where level is lenient, standard or strict."
+        ),
+    )
+
     # Required, no default — which grader to use is exactly the kind of
     # consequential choice this project doesn't silently default (same
     # reasoning as DATABASE_URL/GRUMPY_TOKEN above). True selects
@@ -239,6 +278,21 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_repo_strictness(self) -> Settings:
+        bad = sorted(
+            f"{repo}={level}"
+            for repo, level in _parse_repo_strictness(self.grumpy_repo_strictness).items()
+            if not _REPO_SHAPE_RE.match(repo) or level not in _STRICTNESS_LEVELS
+        )
+        if bad:
+            raise ValueError(
+                "GRUMPY_REPO_STRICTNESS contains invalid entries (must be "
+                f"'owner/name=level', level one of {', '.join(_STRICTNESS_LEVELS)}): "
+                f"{', '.join(bad)}"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_body_size_relationship(self) -> Settings:
         if self.max_request_body_bytes < self.max_diff_bytes:
             raise ValueError(
@@ -262,6 +316,12 @@ class Settings(BaseSettings):
         """
         allowed = _parse_allowed_repos(self.grumpy_allowed_repos)
         return allowed is None or repo in allowed
+
+    def strictness_for(self, repo: str) -> Strictness:
+        """The grading strictness for `repo`: its GRUMPY_REPO_STRICTNESS
+        override if it has one, otherwise GRADING_STRICTNESS."""
+        overrides = _parse_repo_strictness(self.grumpy_repo_strictness)
+        return overrides.get(repo, self.grading_strictness)  # type: ignore[return-value]
 
 
 def get_settings() -> Settings:

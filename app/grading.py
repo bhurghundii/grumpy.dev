@@ -31,8 +31,10 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.config import Strictness
+
 MODEL = "claude-opus-5"
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
@@ -77,21 +79,56 @@ List the discrete, verifiable claims about what this diff changes, as a \
 short bulleted list. Base every claim strictly on what the diff shows. Do \
 not infer intent beyond what the diff makes visible."""
 
-# Shared by both comparison-prompt tone variants below — the grading rule
-# itself never changes with MEANIEMODE, only how `reasoning` is worded.
-_COMPARISON_GRADING_RULE = """\
+_COMPARISON_PREAMBLE = """\
 You are grading whether a developer's answer demonstrates real \
 understanding of a code change. You are given an independent \
 interpretation of the diff, produced without seeing the answer, so it is \
-not biased toward it.
+not biased toward it."""
 
+# One grading rule per strictness level (GRADING_STRICTNESS and
+# GRUMPY_REPO_STRICTNESS in app/config.py). The rule decides
+# passed/failed; MEANIEMODE never changes it, only how `reasoning` is
+# worded. "standard" is the original rule, word for word, so a deployment
+# that never sets a strictness grades exactly as it did before — and the
+# recorded eval cassettes still describe it.
+#
+# Every level fails an answer that contradicts the diff. What they differ
+# on is how much an answer that's merely incomplete or vague gets away
+# with.
+_GRADING_RULES: dict[Strictness, str] = {
+    "lenient": """\
+Grading rule: only wrong answers fail. This rule decides passed/failed \
+and is not affected by anything below.
+- An answer that states something the diff does not do fails.
+- An answer that is vague, partial, or misses the main point of the change \
+still passes, as long as it is recognisably about this change and nothing \
+in it is wrong.
+- An answer with nothing in it specific to this change (e.g. "fixes \
+stuff", "see the diff") fails, since it has no content to check.
+- Terse phrasing is fine. Poorly written or non-native English phrasing is \
+fine. Wrong content is not.""",
+    "standard": """\
 Grading rule: weight contradictions over missing coverage. This rule \
 decides passed/failed and is not affected by anything below.
 - An answer that states something the diff does not do fails.
 - An answer that is correct but covers less than the full interpretation \
 still passes, unless what it omits is the point of the change.
 - Terse phrasing is fine. Poorly written or non-native English phrasing is \
-fine. Wrong content is not."""
+fine. Wrong content is not.""",
+    "strict": """\
+Grading rule: the answer must be correct and complete. This rule decides \
+passed/failed and is not affected by anything below.
+- An answer that states something the diff does not do fails.
+- An answer that omits the point of the change, or any claim in the \
+interpretation that changes runtime behaviour, fails. Omitting purely \
+cosmetic claims (formatting, comments, renames with no behavioural effect) \
+is fine.
+- Vague statements that would describe many different changes \
+("refactors the handler", "fixes the bug") do not count as covering a \
+claim; the answer must name what specifically changed.
+- Terse phrasing is fine. Poorly written or non-native English phrasing is \
+fine. Wrong, vague, or incomplete content is not.""",
+}
 
 # MEANIEMODE=true: today's scathing "grumpy" roast persona.
 _COMPARISON_TONE_MEAN = """\
@@ -125,9 +162,18 @@ matter-of-fact, not harsh.
 
 Respond with your verdict."""
 
-_COMPARISON_SYSTEM_PROMPT_MEAN = f"{_COMPARISON_GRADING_RULE}\n\n{_COMPARISON_TONE_MEAN}"
-_COMPARISON_SYSTEM_PROMPT_PROFESSIONAL = (
-    f"{_COMPARISON_GRADING_RULE}\n\n{_COMPARISON_TONE_PROFESSIONAL}"
+
+
+def _comparison_system_prompt(*, strictness: Strictness, meaniemode: bool) -> str:
+    tone = _COMPARISON_TONE_MEAN if meaniemode else _COMPARISON_TONE_PROFESSIONAL
+    return f"{_COMPARISON_PREAMBLE}\n\n{_GRADING_RULES[strictness]}\n\n{tone}"
+
+
+# The standard-strictness prompts, which is what every deployment got
+# before strictness existed.
+_COMPARISON_SYSTEM_PROMPT_MEAN = _comparison_system_prompt(strictness="standard", meaniemode=True)
+_COMPARISON_SYSTEM_PROMPT_PROFESSIONAL = _comparison_system_prompt(
+    strictness="standard", meaniemode=False
 )
 
 _TUTORIAL_SYSTEM_PROMPT = """\
@@ -157,7 +203,17 @@ short phrase naming what that step covers.
 thing this format exists to avoid; more than six and the reader is \
 clicking, not learning.
 - Do not repeat the line numbers inside `body`; the developer sees the \
-code itself next to it. Keep each `body` to a short paragraph or two."""
+code itself next to it. Keep each `body` to a short paragraph or two.
+
+Every step ends with a check the developer must answer in their own words \
+before they can move on, and only then sees your answer beside theirs:
+- `check_question` must be answerable from that step's lines and `body` \
+alone. Ask why something is done, what happens if an input or condition \
+changes, or what would break if a line were removed — not a yes/no \
+question, and not one answered by repeating a sentence of `body`.
+- It should take one to three sentences to answer.
+- `check_answer` is a short model answer to it, in the same plain \
+teaching tone. Keep it to one to three sentences."""
 
 _EXPLAIN_BACK_SYSTEM_PROMPT = """\
 A developer was given a step-by-step breakdown of a diff after getting a \
@@ -213,8 +269,17 @@ _TUTORIAL_SCHEMA = {
                     "body": {"type": "string"},
                     "start_line": {"type": "integer"},
                     "end_line": {"type": "integer"},
+                    "check_question": {"type": "string"},
+                    "check_answer": {"type": "string"},
                 },
-                "required": ["title", "body", "start_line", "end_line"],
+                "required": [
+                    "title",
+                    "body",
+                    "start_line",
+                    "end_line",
+                    "check_question",
+                    "check_answer",
+                ],
                 "additionalProperties": False,
             },
         }
@@ -244,12 +309,20 @@ class TutorialStep:
     start_line/end_line are None when the model's anchor was unusable and
     _parse_tutorial dropped it: the prose is still worth showing, just
     without a slice.
+
+    check_question/check_answer are the step's write-then-reveal check:
+    the developer answers in their own words before Next appears, then sees
+    check_answer beside what they wrote. Both or neither — a question with
+    no reference answer has nothing to reveal, so _parse_step drops the
+    pair rather than half of it.
     """
 
     title: str
     body: str
     start_line: int | None = None
     end_line: int | None = None
+    check_question: str | None = None
+    check_answer: str | None = None
 
 
 @dataclass
@@ -265,7 +338,9 @@ class TutorialBreakdown:
 
 
 class Grader(Protocol):
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult: ...
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult: ...
 
     async def generate_tutorial(self, diff: str, question: str) -> TutorialBreakdown: ...
 
@@ -288,7 +363,10 @@ class FakeGrader:
     MARKER = "looks-good"
     EXPLAIN_MARKER = "i-understand"
 
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult:
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult:
+        # strictness is ignored: the marker is all this grader looks at.
         if self.MARKER in answer:
             return GradeResult(passed=True, reasoning=f"answer contains '{self.MARKER}'")
         return GradeResult(passed=False, reasoning=f"answer is missing '{self.MARKER}'")
@@ -316,6 +394,8 @@ class FakeGrader:
                     ),
                     start_line=start,
                     end_line=min(end, total),
+                    check_question=f"FAKE check {n}",
+                    check_answer=f"FAKE reference answer {n}",
                 )
             )
         return TutorialBreakdown(text=_flatten_steps(steps), steps=steps)
@@ -359,11 +439,15 @@ class RealGrader:
         )
         self._meaniemode = meaniemode
 
-    async def grade(self, diff: str, question: str, answer: str) -> GradeResult:
+    async def grade(
+        self, diff: str, question: str, answer: str, *, strictness: Strictness = "standard"
+    ) -> GradeResult:
+        """`strictness` only reaches the comparison call. The interpretation
+        is the same whatever the level, since it never sees the answer."""
         try:
             async with self._client_factory() as client:
                 interpretation = await self._interpret(client, diff)
-                return await self._compare(client, interpretation, answer)
+                return await self._compare(client, interpretation, answer, strictness)
         except GradingError:
             raise
         except Exception as exc:  # httpx errors, timeouts, anything unexpected
@@ -382,7 +466,11 @@ class RealGrader:
         return text
 
     async def _compare(
-        self, client: httpx.AsyncClient, interpretation: str, answer: str
+        self,
+        client: httpx.AsyncClient,
+        interpretation: str,
+        answer: str,
+        strictness: Strictness,
     ) -> GradeResult:
         user_content = (
             f"Interpretation of the change:\n{interpretation}\n\n"
@@ -392,10 +480,8 @@ class RealGrader:
         )
         data = await self._call(
             client,
-            system=(
-                _COMPARISON_SYSTEM_PROMPT_MEAN
-                if self._meaniemode
-                else _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
+            system=_comparison_system_prompt(
+                strictness=strictness, meaniemode=self._meaniemode
             ),
             user_content=user_content,
             output_schema=_VERDICT_SCHEMA,
@@ -601,7 +687,20 @@ def _parse_step(raw: Any, line_count: int) -> TutorialStep | None:
     else:
         start = end = None
 
-    return TutorialStep(title=title.strip(), body=body.strip(), start_line=start, end_line=end)
+    question, answer = raw.get("check_question"), raw.get("check_answer")
+    if not (isinstance(question, str) and question.strip()) or not (
+        isinstance(answer, str) and answer.strip()
+    ):
+        question = answer = None
+
+    return TutorialStep(
+        title=title.strip(),
+        body=body.strip(),
+        start_line=start,
+        end_line=end,
+        check_question=question.strip() if question else None,
+        check_answer=answer.strip() if answer else None,
+    )
 
 
 def _parse_tutorial(text: str, line_count: int) -> list[TutorialStep]:
