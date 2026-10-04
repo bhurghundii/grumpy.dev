@@ -99,7 +99,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  ask:
+  grill:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,14 +120,20 @@ jobs:
           git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
           # ... POST /sessions with that diff, on every run (it's
           # idempotent). On a 201, output the session URL for the next step.
+          # On any other result, ::warning and exit 0 — never fail the PR.
 
       - name: Comment session link
         if: steps.grumpy.outputs.session_url
+        continue-on-error: true
         # ... comment the session URL on the PR
 ```
 
-The job itself finishes in seconds and goes red only when something is
-broken; it is not the gate. `grumpy/verdict` is.
+The job itself finishes in seconds and never goes red: if grumpy is
+unreachable or rejects the request, it warns and passes, because a grumpy
+outage is not something the PR author can fix. It is not the gate.
+`grumpy/verdict` is, and only if you require it in branch protection;
+unrequired, grumpy is advisory. (The job was called `ask` before it became
+non-blocking. If branch protection still requires `ask`, remove it.)
 
 ### Why the gate is a commit status, not the job
 
@@ -153,7 +159,8 @@ brings GitHub back in line.
 Without `GITHUB_STATUS_TOKEN`, nothing posts `grumpy/verdict`, and nothing
 in the reference workflow notices: the job stays green. To gate anyway, add
 a step that reads `GET /verdict` once and fails unless it's `PASSED`, and
-require the job instead. Post the session link
+require the job instead. That deliberately makes the job blocking again,
+including on a grumpy outage. Post the session link
 *before* that step, and expect to re-run the job after answering. Don't
 poll inside the job for the answer: see above.
 

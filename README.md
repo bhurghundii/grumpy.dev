@@ -27,7 +27,7 @@ Yeah but I got a business to run so I am trying my best here.
 2. grumpy generates a session, stores the diff, and returns a URL with a one-time token — `https://your-grumpy/s/<token>`.
 3. The PR author opens the link, reads their own diff, and answers the question in a plain textarea. No login required — the token in the URL is the credential.
 4. grumpy grades the answer with Claude: one call to interpret the diff blind (no answer shown), one call to compare that interpretation against what the developer wrote. Contradicting the diff fails; being terse or incomplete-but-correct passes.
-5. grumpy reports the verdict on the PR as a `grumpy/verdict` commit status: pending until the author answers, then green or red the moment the answer is graded. Require it like any other check. Nothing sits on a runner waiting for a human, and nobody has to re-run anything.
+5. grumpy reports the verdict on the PR as a `grumpy/verdict` commit status: pending until the author answers, then green or red the moment the answer is graded. The workflow job that asks the question, `grill`, never blocks: it passes even if grumpy is down. Whether the verdict blocks merging is your call: require `grumpy/verdict` in branch protection to make it a gate, or leave it unrequired and it's advisory. Nothing sits on a runner waiting for a human, and nobody has to re-run anything.
 
 A wrong answer doesn't end the session — the developer sees why they were wrong and gets another attempt, up to a configurable limit. See [Configuration](#configuration) for retries, an optional guided-tutorial mode, and a "meanie mode" that makes the failure reasoning much less polite.
 
@@ -122,7 +122,7 @@ grumpy does ship a few defaults out of the box: interactive API docs (`/docs`, `
 
 (This is the part where you just shove the instructions into an LLM) 
 
-Add a workflow that opens a grumpy session on every PR, then require the `grumpy/verdict` status in branch protection. Minimal shape:
+Add a workflow that opens a grumpy session on every PR. Its one job, `grill`, is non-blocking: it comments the question link and passes, and if grumpy is unreachable or rejects the request it warns instead of failing the PR. To make the answer gate merging, also require the `grumpy/verdict` status in branch protection; leave it out and grumpy is advisory. Minimal shape:
 
 ```yaml
 on:
@@ -130,7 +130,7 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  grumpy:
+  grill:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -142,8 +142,9 @@ jobs:
           GRUMPY_TOKEN: ${{ secrets.GRUMPY_TOKEN }}
         run: |
           # POST /sessions with the diff and comment the link on the PR.
-          # grumpy posts the grumpy/verdict status itself. Full script
-          # with all the edge cases handled: see INTEGRATION.md.
+          # On any error, emit a ::warning and exit 0 so the job never
+          # blocks. grumpy posts the grumpy/verdict status itself. Full
+          # script with all the edge cases handled: see INTEGRATION.md.
 ```
 
 The full working workflow (session creation, PR comment) is in [INTEGRATION.md](INTEGRATION.md), and the exact version this repo uses on itself is in [`.github/workflows/grumpy.yml`](.github/workflows/grumpy.yml). You'll need two repo/org secrets: `GRUMPY_BASE_URL` (your deployment's public URL) and `GRUMPY_TOKEN` (the same value the server is configured with), plus `GITHUB_STATUS_TOKEN` set on the server.

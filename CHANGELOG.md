@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Changed**
+
+- The workflow's job is now called `grill` (was `ask`) and is non-blocking:
+  if grumpy is unreachable or rejects the request, the job warns and still
+  passes instead of failing the PR. The gate, if you want one, is still the
+  `grumpy/verdict` commit status. If branch protection requires `ask`,
+  remove it or switch it to `grumpy/verdict`.
+
 **Added**
 
 - Per-repo grading strictness. `GRADING_STRICTNESS` sets the deployment-wide
