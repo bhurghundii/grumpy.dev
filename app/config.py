@@ -15,7 +15,15 @@ import re
 from pathlib import Path
 from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
@@ -110,11 +118,22 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Without this a validation error carries every input value — the
+        # whole environment, for a model-level validator — and get_settings()
+        # prints it on exit, i.e. into the deployment's log. pydantic
+        # truncates the dump, but the part it keeps is the tail of the last
+        # field set, which on a real-grader deploy is MODEL_API_KEY.
+        hide_input_in_errors=True,
     )
+
+    # The four secrets below are SecretStr, not str, so a repr of Settings
+    # (a debugger, a stray log line, a traceback's locals) shows '**********'
+    # rather than the value. Read one with .get_secret_value() only where
+    # it's actually sent somewhere.
 
     # Required — no default. Missing this at startup must fail fast and name
     # the variable (DATABASE_URL), not fail somewhere deep in a DB call.
-    database_url: str = Field(
+    database_url: SecretStr = Field(
         ...,
         description="Postgres DSN, e.g. postgresql://user:pass@host:5432/db",
     )
@@ -129,7 +148,7 @@ class Settings(BaseSettings):
 
     # Required — the bearer token the Action must present to /sessions and
     # /verdict. Compared with secrets.compare_digest, never ==.
-    grumpy_token: str = Field(
+    grumpy_token: SecretStr = Field(
         ...,
         description="Shared bearer token required on /sessions and /verdict",
     )
@@ -152,7 +171,7 @@ class Settings(BaseSettings):
     # PR's head commit (pending, then success/failure once an answer is
     # graded) — see app/commit_status.py. Unset or blank posts nothing, and
     # an Action has to gate on GET /verdict itself.
-    github_status_token: str | None = None
+    github_status_token: SecretStr | None = None
 
     # Only worth changing for GitHub Enterprise Server, whose REST API lives
     # at https://<host>/api/v3.
@@ -278,20 +297,21 @@ class Settings(BaseSettings):
     # key configured, checked below, since that's the one part of "false"
     # this phase can actually validate ahead of phase 4 existing.
     fake_grader: bool = Field(...)
-    model_api_key: str | None = None
+    model_api_key: SecretStr | None = None
 
     @field_validator("grumpy_token")
     @classmethod
-    def _reject_weak_token(cls, value: str) -> str:
-        if value in _PLACEHOLDER_GRUMPY_TOKENS:
+    def _reject_weak_token(cls, value: SecretStr) -> SecretStr:
+        token = value.get_secret_value()
+        if token in _PLACEHOLDER_GRUMPY_TOKENS:
             raise ValueError(
                 "GRUMPY_TOKEN is still the .env.example placeholder value — "
                 'generate a real one, e.g.: python -c "import secrets; '
                 'print(secrets.token_urlsafe(32))"'
             )
-        if len(value) < MIN_GRUMPY_TOKEN_LENGTH:
+        if len(token) < MIN_GRUMPY_TOKEN_LENGTH:
             raise ValueError(
-                f"GRUMPY_TOKEN is too short ({len(value)} chars, need at "
+                f"GRUMPY_TOKEN is too short ({len(token)} chars, need at "
                 f"least {MIN_GRUMPY_TOKEN_LENGTH}) — generate a real one, "
                 'e.g.: python -c "import secrets; '
                 'print(secrets.token_urlsafe(32))"'
@@ -310,7 +330,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_model_key_unless_fake(self) -> Settings:
-        if not self.fake_grader and not self.model_api_key:
+        if not self.fake_grader and not (
+            self.model_api_key and self.model_api_key.get_secret_value()
+        ):
             raise ValueError("MODEL_API_KEY is required when FAKE_GRADER=false")
         return self
 

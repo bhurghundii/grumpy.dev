@@ -57,13 +57,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
 
     startup_logger.info("running migrations")
-    applied = await run_migrations(settings.database_url, settings.migrations_dir)
+    applied = await run_migrations(
+        settings.database_url.get_secret_value(), settings.migrations_dir
+    )
     startup_logger.info(
         "migrations complete", extra={"outcome": "ok", "path": ",".join(applied) or "none pending"}
     )
 
     pool = await create_pool(
-        settings.database_url,
+        settings.database_url.get_secret_value(),
         min_size=settings.db_pool_min_size,
         max_size=settings.db_pool_max_size,
     )
@@ -74,7 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.grader = FakeGrader()
     else:
         app.state.grader = RealGrader(
-            api_key=settings.model_api_key, meaniemode=settings.meaniemode
+            api_key=settings.model_api_key.get_secret_value(), meaniemode=settings.meaniemode
         )
 
     # Logged because NullStatusPublisher is silent by design: it posts
@@ -87,9 +89,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # plus a warning means GitHub refused it. Note the token is read once,
     # at startup — setting it on a running deployment does nothing until
     # the process restarts, which this line also makes visible.
-    if settings.github_status_token:
+    if settings.github_status_token and settings.github_status_token.get_secret_value():
         app.state.status_publisher = GitHubStatusPublisher(
-            settings.github_status_token, api_url=settings.github_api_url
+            settings.github_status_token.get_secret_value(), api_url=settings.github_api_url
         )
         startup_logger.info("commit status reporting enabled", extra={"outcome": "enabled"})
     else:
