@@ -123,6 +123,19 @@ def _session_token(session_url: str) -> str:
     return session_url.rsplit("/", 1)[-1]
 
 
+def _submit_sheet(client, token: str, answer_text: str):
+    """Submit every answer on the exam sheet as the same text. FakeGrader
+    marks an answer passed iff it contains 'looks-good', so 'looks-good'
+    passes the whole sheet and anything else fails it. Sends more answer_i
+    fields than there are questions; the handler reads only as many as the
+    sheet has."""
+    return client.post(
+        f"/s/{token}/submit",
+        data={f"answer_{i}": answer_text for i in range(10)},
+        follow_redirects=False,
+    )
+
+
 def test_blank_status_token_means_nothing_is_posted(grumpy_env, monkeypatch, capsys) -> None:
     # Blank rather than deleted: it's what docker-compose's `${VAR:-}`
     # hands the app when .env doesn't set it, and it also keeps a
@@ -176,11 +189,7 @@ def test_passing_answer_posts_success(grumpy_env) -> None:
     with TestClient(app) as client:
         app.state.status_publisher = recorder
         session_url = _create_session(client, grumpy_env.token, repo).json()["session_url"]
-        client.post(
-            f"/s/{_session_token(session_url)}/answer",
-            data={"answer": "looks-good"},
-            follow_redirects=False,
-        )
+        _submit_sheet(client, _session_token(session_url), "looks-good")
 
     assert recorder.calls[-1] == {
         "repo": repo,
@@ -201,10 +210,10 @@ def test_wrong_answers_post_nothing_until_the_last_attempt_posts_failure(
         session_url = _create_session(client, grumpy_env.token, repo).json()["session_url"]
         token = _session_token(session_url)
 
-        client.post(f"/s/{token}/answer", data={"answer": "no idea"}, follow_redirects=False)
+        _submit_sheet(client, token, "no idea")
         assert [call["status"] for call in recorder.calls] == ["pending"]
 
-        client.post(f"/s/{token}/answer", data={"answer": "still no idea"}, follow_redirects=False)
+        _submit_sheet(client, token, "still no idea")
 
     assert [call["status"] for call in recorder.calls] == ["pending", "failed"]
 
@@ -217,7 +226,7 @@ def test_record_answer_reports_the_stored_status_not_its_own_decision(grumpy_env
     with TestClient(app) as client:
         session_url = _create_session(client, grumpy_env.token, repo).json()["session_url"]
         token = _session_token(session_url)
-        client.post(f"/s/{token}/answer", data={"answer": "looks-good"}, follow_redirects=False)
+        _submit_sheet(client, token, "looks-good")
 
     async def _late_failing_answer() -> str:
         async with app.router.lifespan_context(app):

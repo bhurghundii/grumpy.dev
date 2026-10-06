@@ -2,7 +2,7 @@
 
 **A merge gate that checks the developer understands the change they are putting in.**
 
-grumpy sits in your PR pipeline as a GitHub Action. Before a PR can merge, grumpy asks whoever opened it one question about their own diff — *"What does this change do, and what breaks if it's wrong?"* — and blocks the merge until they answer it well enough to convince an LLM grader. 
+grumpy sits in your PR pipeline as a GitHub Action. Before a PR can merge, grumpy sets whoever opened it a short exam about their own diff — a handful of scoped questions, the first always *"How does this change work on a high level?"* — and blocks the merge until they answer enough of them well enough to convince an LLM grader. 
 
 ## Why should you care?
 
@@ -11,7 +11,7 @@ More and more PRs are AI-generated or AI-assisted, and "LGTM, CI is green" is no
 - **YAGNI the SaaS** grumpy is self-hosted only - one Docker Compose command and it's running.
 - **No GitHub App, no OAuth, no webhooks.** It's a small FastAPI service that a GitHub Action talks to over a bearer token. Nothing to install on the GitHub side beyond a workflow file. Just keep the token a secret.
 - **Real grading, not a keyword check.** Answers are graded by Claude against a blind interpretation of the diff, so it can't be gamed by echoing the question back.
-- **Tutorials to help you understand the code** - Submitted a 3,000 line monstrosity? Grumpy will break it down to explain how it works. (Dev note: I learned about Firebase Security Rules changes this way that I would've totally missed so really needed this)
+- **Scoped questions, not one broad prompt.** grumpy writes a question per part of the change, so a 3,000-line monstrosity gets picked apart section by section rather than waved through with one vague summary.
 
 ## Need a demo? 
 
@@ -24,12 +24,12 @@ Yeah but I got a business to run so I am trying my best here.
 ## How it works
 
 1. A PR is opened or updated. Your workflow runs `git diff base...head` — three dots, so the diff is the PR's own changes measured from the merge base, not a two-dot comparison that would also include the reverse of anything landed on the base branch since — and `POST`s it to your grumpy instance.
-2. grumpy generates a session, stores the diff, and returns a URL with a one-time token — `https://your-grumpy/s/<token>`.
-3. The PR author opens the link, reads their own diff, and answers the question in a plain textarea. No login required — the token in the URL is the credential.
-4. grumpy grades the answer with Claude: one call to interpret the diff blind (no answer shown), one call to compare that interpretation against what the developer wrote. Contradicting the diff fails; being terse or incomplete-but-correct passes.
-5. grumpy reports the verdict on the PR as a `grumpy/verdict` commit status: pending until the author answers, then green or red the moment the answer is graded. The workflow job that asks the question, `grill`, never blocks: it passes even if grumpy is down. Whether the verdict blocks merging is your call: require `grumpy/verdict` in branch protection to make it a gate, or leave it unrequired and it's advisory. Nothing sits on a runner waiting for a human, and nobody has to re-run anything.
+2. grumpy generates a session, stores the diff, writes the exam questions (the high-level one plus a scoped question per part of the change), and returns a URL with a one-time token — `https://your-grumpy/s/<token>`.
+3. The PR author opens the link, reads their own diff, and answers every question on one page. No login required — the token in the URL is the credential.
+4. grumpy grades the whole sheet with Claude: one call to interpret the diff blind (no answers shown), one call to mark each answer against that interpretation. Marking is lenient — contradicting the diff fails a question; a terse or high-level-but-correct answer passes it. The session passes when at least `PASSINGMARKS` answers are correct.
+5. grumpy reports the verdict on the PR as a `grumpy/verdict` commit status: pending until the author answers, then green or red the moment the sheet is graded. The workflow job that opens the session, `grill`, never blocks: it passes even if grumpy is down. Whether the verdict blocks merging is your call: require `grumpy/verdict` in branch protection to make it a gate, or leave it unrequired and it's advisory. Nothing sits on a runner waiting for a human, and nobody has to re-run anything.
 
-A wrong answer doesn't end the session — the developer sees why they were wrong and gets another attempt, up to a configurable limit. See [Configuration](#configuration) for retries, an optional guided-tutorial mode, and a "meanie mode" that makes the failure reasoning much less polite.
+A failing sheet doesn't end the session — the developer sees which answers missed and why, and gets another attempt, up to a configurable limit. See [Configuration](#configuration) for the sheet size, the pass threshold, retries, and a "meanie mode" that makes the failure notes much less polite.
 
 ## Quickstart (self-host it)
 
@@ -99,11 +99,10 @@ All config is environment variables, validated at startup — grumpy refuses to 
 | `MODEL_API_KEY` | only if `FAKE_GRADER=false` | — | Anthropic API key used by the real grader |
 | `GITHUB_STATUS_TOKEN` | no | unset | GitHub token with *Commit statuses: write* on the gated repos. grumpy uses it to post the `grumpy/verdict` status; unset, it posts nothing and your workflow has to gate on `GET /verdict` itself |
 | `GRUMPY_ALLOWED_REPOS` | no | unset (any repo) | Comma-separated `owner/name` allow-list. Defense-in-depth if `GRUMPY_TOKEN` ever leaks |
-| `MAX_SESSION_ATTEMPTS` | no | `3` | Graded answers + tutorial requests allowed per session before it locks in as failed. `0` = unlimited retries |
-| `ENABLE_TUTORIAL` | no | `false` | Offers a step-by-step, non-graded walkthrough of the diff. Each step ends with a check question you answer in your own words before Next appears, then see a reference answer beside yours (never graded, generated in the same model call), and the walkthrough ends with a light explain-back check. Draws on the same `MAX_SESSION_ATTEMPTS` budget as an answer, so the last remaining attempt is reserved for answering and the offer is withdrawn at that point |
-| `MEANIEMODE` | no | `false` | Failure explanations become sarcastic and merciless instead of professional. Doesn't change pass/fail, only tone |
-| `GRADING_STRICTNESS` | no | `standard` | How hard answers are graded: `lenient` (only wrong answers fail; vague or partial ones pass), `standard`, or `strict` (vague answers, or ones that skip part of what the change does, fail too). Changes pass/fail, unlike `MEANIEMODE` |
-| `GRUMPY_REPO_STRICTNESS` | no | unset | Per-repo overrides of `GRADING_STRICTNESS`, e.g. `octo/scratch=lenient,octo/payments=strict`. Server-side so a PR can't loosen its own gate. Each answer records the level it was graded at |
+| `MAX_SESSION_ATTEMPTS` | no | `3` | Graded exam submissions allowed per session before it locks in as failed. `0` = unlimited retries |
+| `EXAM_QUESTION_COUNT` | no | `5` | Questions on the sheet, including the fixed high-level first one. The model writes the rest, each scoped to a part of the diff |
+| `PASSINGMARKS` | no | `3` | How many answers must be marked correct for the session to pass. Must be between `1` and `EXAM_QUESTION_COUNT` |
+| `MEANIEMODE` | no | `false` | Failure notes become sarcastic and merciless instead of professional. Doesn't change which answers passed, only tone |
 | `EVALUATOR` | no | unset (defaults below) | JSON config for checks that reject a PR before any question is asked: `POST /sessions` returns `422` with the reason, and the `grill` job comments it on the PR and goes red. Today there is one check, `size`: `{"size": {"max_changed_lines": 1000, "exclude": ["*.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum"]}}` (those are the defaults). Changed lines are added + removed lines, not context; files matching an `exclude` glob (path or basename) don't count. `max_changed_lines: 0` turns the check off. Omitted keys keep their defaults; unknown keys or bad values fail startup |
 | `MAX_DIFF_BYTES` | no | `400000` | Larger diffs are rejected like an `EVALUATOR` check (`422`, red `grill` job). Bounded by the model's context window, not by Postgres: at ~3–4 bytes per token, 400 KB is ~100k–130k tokens. Raise it much further and you accept diffs that can never be graded |
 
@@ -113,7 +112,7 @@ grumpy's `/sessions` and `/verdict` endpoints are bearer-gated, but the answer p
 
 - **Put a reverse proxy or CDN in front of it that rate-limits and caps request body size.** grumpy has no built-in rate limiting — an in-process limiter would be false security the moment you run more than one replica.
 - **Redact `/s/{token}` from your proxy's access logs.** That path *is* a bearer-equivalent secret. grumpy keeps it out of its own structured logs and disables uvicorn's access log for this reason, but a default nginx/Caddy line in front of it will happily write the token to disk.
-- **Set spend limits on your Anthropic API key.** Real grading is two synchronous Claude calls per submitted answer, with no built-in per-deployment budget.
+- **Set spend limits on your Anthropic API key.** Real grading is two synchronous Claude calls per submitted sheet, plus one call to write the questions when the session is created, with no built-in per-deployment budget.
 - **Treat `GRUMPY_TOKEN` as a real secret**, and set `GRUMPY_ALLOWED_REPOS` if you want a leaked token to not be usable against arbitrary repos.
 - **Diffs are stored in Postgres in plaintext** — scope database access like it holds source code, because it does.
 
@@ -170,9 +169,9 @@ Python, FastAPI, `uv`, psycopg3 (async, raw SQL, no ORM), Postgres 16, server-re
 
 ## Limitations
 
-The question grumpy asks is currently fixed — it doesn't generate a new question per diff. There's no author-identity check (the session URL alone is the credential), no confidence scores or partial credit, no multi-turn follow-up, and no queue — grading happens synchronously inside the answer submission. Grumpy is also, in principle, prompt-injection-attackable: both the diff and the developer's answer are attacker-influenceable text fed to an LLM. The blind-interpretation grading design (see `app/grading.py`) blunts the obvious cases but isn't a formal defense.
+The pass threshold is a flat count (`PASSINGMARKS` of `EXAM_QUESTION_COUNT`) — no per-question weighting, no partial credit within a question. There's no author-identity check (the session URL alone is the credential), no multi-turn follow-up, and no queue — grading happens synchronously inside the submission. Grumpy is also, in principle, prompt-injection-attackable: both the diff and the developer's answers are attacker-influenceable text fed to an LLM. The blind-interpretation grading design (see `app/grading.py`) blunts the obvious cases but isn't a formal defense.
 
-The answer box blocks pasting, but that's friction, not enforcement: anyone can retype text, turn JavaScript off, or POST the form directly. A submission made without the guard running is still graded normally — it's recorded (`answers.js_active` / `tutorials.explanation_js_active` = `false`) and logged with `outcome: no_js`, not failed.
+The answer boxes block pasting, but that's friction, not enforcement: anyone can retype text, turn JavaScript off, or POST the form directly. A submission made without the guard running is still graded normally — it's recorded (`answers.js_active` = `false`) and logged with `outcome: no_js`, not failed.
 
 ## License
 

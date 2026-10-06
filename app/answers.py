@@ -30,11 +30,10 @@ _LATEST_ANSWER_SQL = """
 """
 
 _COUNT_ANSWERS_SQL = "SELECT count(*) FROM answers WHERE session_id = %(session_id)s"
-_COUNT_TUTORIALS_SQL = "SELECT count(*) FROM tutorials WHERE session_id = %(session_id)s"
 
 _INSERT_ANSWER_SQL = """
-    INSERT INTO answers (session_id, body, passed, model, prompt_version, reasoning, js_active, strictness, created_at)
-    VALUES (%(session_id)s, %(body)s, %(passed)s, %(model)s, %(prompt_version)s, %(reasoning)s, %(js_active)s, %(strictness)s, now())
+    INSERT INTO answers (session_id, body, passed, model, prompt_version, reasoning, js_active, created_at)
+    VALUES (%(session_id)s, %(body)s, %(passed)s, %(model)s, %(prompt_version)s, %(reasoning)s, %(js_active)s, now())
 """
 
 # Only ever transitions a session out of 'pending' — a request that loses
@@ -81,17 +80,14 @@ async def record_answer(
     prompt_version: str | None = None,
     reasoning: str | None = None,
     js_active: bool | None = None,
-    strictness: str | None = None,
 ) -> str:
-    """Inserts the answer row and decides the resulting session status in
-    the same transaction as the write, counting existing answers AND
-    tutorials — the MAX_SESSION_ATTEMPTS budget is shared between the two
-    action types (see app/config.py and app/tutorials.py's symmetric
-    create_tutorial). A passing answer always sets 'passed'. A failing
-    answer sets 'failed' only once max_session_attempts is exhausted (0
-    means never, i.e. unlimited retries); otherwise the session stays
-    'pending' so /verdict keeps reporting PENDING and the developer can
-    retry.
+    """Inserts the answer row (one row per submitted exam sheet) and decides
+    the resulting session status in the same transaction as the write,
+    counting existing sheets against MAX_SESSION_ATTEMPTS. A passing sheet
+    always sets 'passed'. A failing sheet sets 'failed' only once
+    max_session_attempts is exhausted (0 means never, i.e. unlimited
+    retries); otherwise the session stays 'pending' so /verdict keeps
+    reporting PENDING and the developer can retry.
 
     Returns the status the session actually holds afterwards, read back
     rather than taken from the decision above: if a concurrent request
@@ -101,17 +97,13 @@ async def record_answer(
     otherwise overwrite the winner's "passed".
 
     `js_active` (whether the paste guard was running) is stored alongside,
-    never consulted here — see migrations/V6__paste_guard.sql. Nor is
-    `strictness`, the level the answer was graded at — see
-    migrations/V7__answers_strictness.sql.
+    never consulted here — see migrations/V6__paste_guard.sql.
     """
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_COUNT_ANSWERS_SQL, {"session_id": session_id})
             (answers_count,) = await cur.fetchone()
-            await cur.execute(_COUNT_TUTORIALS_SQL, {"session_id": session_id})
-            (tutorials_count,) = await cur.fetchone()
-            attempts_used = answers_count + tutorials_count + 1
+            attempts_used = answers_count + 1
 
             if passed:
                 status = "passed"
@@ -130,7 +122,6 @@ async def record_answer(
                     "prompt_version": prompt_version,
                     "reasoning": reasoning,
                     "js_active": js_active,
-                    "strictness": strictness,
                 },
             )
             await cur.execute(

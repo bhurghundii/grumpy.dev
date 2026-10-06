@@ -59,8 +59,8 @@ def test_oversized_answer_form_body_rejected_with_413(grumpy_env, monkeypatch) -
 
     with TestClient(app) as client:
         response = client.post(
-            "/s/" + secrets.token_urlsafe(32) + "/answer",
-            data={"answer": "x" * 2000},
+            "/s/" + secrets.token_urlsafe(32) + "/submit",
+            data={"answer_0": "x" * 2000},
         )
 
     assert response.status_code == 413

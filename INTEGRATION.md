@@ -33,9 +33,13 @@ The response looks like:
 {
   "session_url": "https://grumpy.example.com/s/<token>",
   "status": "pending",
-  "question": "What does this change do, and what breaks if it's wrong?"
+  "question": "How does this change work on a high level?"
 }
 ```
+
+`question` is the first (high-level) question on the exam sheet. The full
+sheet — that question plus the scoped ones grumpy writes for the diff — is
+shown on the session page; the author answers all of them at once.
 
 With `GITHUB_STATUS_TOKEN` set on the server, grumpy then reports the verdict
 on the PR itself, as a `grumpy/verdict` commit status on `head_sha`:
@@ -43,11 +47,11 @@ on the PR itself, as a `grumpy/verdict` commit status on `head_sha`:
 | When | State |
 |---|---|
 | every `POST /sessions` for that head SHA | `pending` (or the verdict, if the session already has one) |
-| a graded answer passes | `success` |
-| a graded answer fails with no attempts left | `failure` |
+| a graded sheet reaches the pass threshold | `success` |
+| a graded sheet fails with no attempts left | `failure` |
 
 Its details link is the session URL. **Require `grumpy/verdict` in branch
-protection, not the workflow's job.** A wrong answer with attempts left
+protection, not the workflow's job.** A failing sheet with attempts left
 changes nothing: the session and the status both stay pending.
 
 `GET /verdict` returns the same outcome, for a workflow that gates on it

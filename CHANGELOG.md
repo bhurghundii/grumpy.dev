@@ -4,6 +4,20 @@
 
 **Changed**
 
+- The review is now a single **exam sheet** instead of one hard question
+  plus an optional tutorial. A session carries a fixed set of scoped
+  questions — the first always "How does this change work on a high level?",
+  the rest written by the model for specific parts of the diff — and the
+  author answers them all on one page, submitted once (`POST /s/{token}/submit`,
+  was `POST /s/{token}/answer`). The whole sheet is marked in one lenient
+  pass and the session passes at `PASSINGMARKS` correct. **Removed** with it:
+  the single-question flow, the step-by-step tutorial (its routes, templates,
+  and the `ENABLE_TUTORIAL` flag), and per-answer grading strictness
+  (`GRADING_STRICTNESS`, `GRUMPY_REPO_STRICTNESS`) — marking is now always
+  high-level/lenient. New config: `EXAM_QUESTION_COUNT` (default 5) and
+  `PASSINGMARKS` (default 3). `MAX_SESSION_ATTEMPTS` now counts exam
+  submissions. Adds migration `V9` (`sessions.questions`); the `tutorials`
+  tables and `answers.strictness` remain but are unused.
 - A diff over `MAX_DIFF_BYTES` is now a `422` rejection that fails the
   `grill` job, not a `413`. The non-blocking job turned the `413` into a
   warning, so the largest PRs were the only ones that skipped grumpy.

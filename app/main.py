@@ -24,11 +24,10 @@ from app.commit_status import GitHubStatusPublisher, NullStatusPublisher
 from app.config import Settings, get_settings
 from app.db import create_pool
 from app.evaluator import evaluate
-from app.grading import FakeGrader, RealGrader
+from app.grading import FakeGrader, GradingError, RealGrader
 from app.logging_config import configure_logging, redact_session_token
 from app.middleware import MaxBodySizeMiddleware
 from app.migrations import run_migrations
-from app.questions import FixedQuestionGenerator
 from app.schemas import CreateSessionRequest
 from app.sessions import build_session_url, create_or_get_session
 from app.verdict import fetch_verdict
@@ -70,7 +69,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_size=settings.db_pool_max_size,
     )
     app.state.pool = pool
-    app.state.question_generator = FixedQuestionGenerator()
 
     if settings.fake_grader:
         app.state.grader = FakeGrader()
@@ -226,7 +224,21 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
     if rejection is not None:
         return JSONResponse(status_code=422, content={"rejection": rejection})
 
-    question = await app.state.question_generator.generate(payload.diff)
+    # Generate the exam sheet up front so /s/{token} can render it with no
+    # model call of its own. On a re-run of an already-created session this
+    # sheet is discarded (create_or_get_session only writes questions on
+    # insert), at the cost of one model call — the workflow re-runs rarely.
+    # A generation failure fails this POST; the non-blocking workflow turns
+    # that into a warning and the next run retries. HIGH_LEVEL_QUESTION is
+    # always the first entry.
+    try:
+        questions = await app.state.grader.generate_exam(
+            payload.diff, settings.exam_question_count
+        )
+    except GradingError as exc:
+        return JSONResponse(
+            status_code=502, content={"detail": f"could not generate the exam: {exc}"}
+        )
     token = secrets.token_urlsafe(32)
 
     row, created = await create_or_get_session(
@@ -236,7 +248,8 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
         head_sha=payload.head_sha,
         base_sha=payload.base_sha,
         diff=payload.diff,
-        question=question,
+        question=questions[0],
+        questions=questions,
         token=token,
         ttl_days=settings.session_ttl_days,
     )

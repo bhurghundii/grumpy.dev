@@ -26,14 +26,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 _INSERT_SQL = """
     INSERT INTO sessions
-        (repo, pr_number, head_sha, base_sha, diff, question, token, status, expires_at)
+        (repo, pr_number, head_sha, base_sha, diff, question, questions, token,
+         status, expires_at)
     VALUES
         (%(repo)s, %(pr_number)s, %(head_sha)s, %(base_sha)s, %(diff)s,
-         %(question)s, %(token)s, 'pending', %(expires_at)s)
+         %(question)s, %(questions)s, %(token)s, 'pending', %(expires_at)s)
     ON CONFLICT (repo, pr_number, head_sha) DO UPDATE
         SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at
         WHERE sessions.status = 'pending' AND sessions.expires_at < now()
@@ -61,6 +63,7 @@ async def create_or_get_session(
     base_sha: str,
     diff: str,
     question: str,
+    questions: list[str],
     token: str,
     ttl_days: int,
 ) -> tuple[dict[str, Any], bool]:
@@ -68,7 +71,12 @@ async def create_or_get_session(
     insert won the race, or re-issued an expired session's link — either
     way the returned URL is one nobody has been given yet. False means a
     live session already existed (created by a prior request or a
-    concurrent one that committed first)."""
+    concurrent one that committed first).
+
+    `questions` is the exam sheet; it is written only on insert. A re-run on
+    an already-created session keeps the sheet it was first given (the
+    ON CONFLICT clause never overwrites it), so the questions stay stable
+    across workflow re-runs and retries."""
     expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
     params = {
         "repo": repo,
@@ -77,6 +85,7 @@ async def create_or_get_session(
         "base_sha": base_sha,
         "diff": diff,
         "question": question,
+        "questions": Jsonb(questions),
         "token": token,
         "expires_at": expires_at,
     }

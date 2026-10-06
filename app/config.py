@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal, get_args
 
 from pydantic import (
     BaseModel,
@@ -46,12 +45,6 @@ MIN_GRUMPY_TOKEN_LENGTH = 20
 # startup, before anything else in the app exists to import from.
 _REPO_SHAPE_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
-# How hard the comparison call grades an answer — one level per rule in
-# app/grading.py's _GRADING_RULES, which imports this. Defined here so
-# app.config keeps no intra-app imports (see _REPO_SHAPE_RE above).
-Strictness = Literal["lenient", "standard", "strict"]
-_STRICTNESS_LEVELS: tuple[str, ...] = get_args(Strictness)
-
 
 def _parse_allowed_repos(raw: str | None) -> frozenset[str] | None:
     """None means unrestricted (any repo permitted). A blank/whitespace/
@@ -65,17 +58,6 @@ def _parse_allowed_repos(raw: str | None) -> frozenset[str] | None:
         return None
     repos = frozenset(r.strip() for r in raw.split(",") if r.strip())
     return repos or None
-
-
-def _parse_repo_strictness(raw: str | None) -> dict[str, str]:
-    """'owner/a=lenient,owner/b=strict' -> {'owner/a': 'lenient', ...}.
-    Blank or unset is an empty mapping, for the same docker-compose reason
-    as _parse_allowed_repos. Entries are only split and trimmed here;
-    _validate_repo_strictness rejects malformed ones at startup."""
-    if raw is None:
-        return {}
-    pairs = (entry.partition("=") for entry in raw.split(",") if entry.strip())
-    return {repo.strip(): level.strip().lower() for repo, _, level in pairs}
 
 
 class SizeCheck(BaseModel):
@@ -219,64 +201,39 @@ class Settings(BaseSettings):
     # below, which enforces that relationship if either value is changed.
     max_request_body_bytes: int = 8_000_000
 
-    # Above this, POST /s/{token}/answer re-renders the answer form with an
+    # Above this, POST /s/{token}/submit re-renders the exam sheet with an
     # inline error (same pattern as the empty-answer case) rather than
-    # persisting the answer or spending a grader call on it. Generous for a
-    # prose answer; exists to bound Postgres storage and Anthropic API
+    # persisting the answers or spending a grader call on them. Applied to
+    # the whole submitted sheet (every answer, concatenated). Generous for
+    # prose answers; exists to bound Postgres storage and Anthropic API
     # spend per submission, not to constrain legitimate answers.
     max_answer_bytes: int = 20_000
 
-    # Total priced actions (graded answer submissions + tutorial-breakdown
-    # requests, combined) allowed per session before it locks in as
+    # Graded exam submissions allowed per session before it locks in as
     # terminal 'failed'. 0 means unlimited — the session just stays
-    # 'pending' after every wrong answer, forever, until it's passed; see
+    # 'pending' after every failing sheet, forever, until it's passed; see
     # app/verdict.py, which keeps reporting PENDING for exactly as long as
-    # that's true. A tutorial request costs exactly as much Anthropic
-    # spend as an answer submission (2 calls each), so both are charged
-    # against the same budget rather than two separate knobs — a cap that
-    # only bounded answers would leave tutorial requests as an unbounded
-    # cost hole. Defaults finite, like every other numeric cap in this
+    # that's true. Defaults finite, like every other numeric cap in this
     # file, rather than unlimited.
     max_session_attempts: int = 3
 
-    # Whether the answer page offers "Get a tutorial breakdown" at all.
-    # When on it sits next to Submit from the first view, so a developer
-    # can ask for the walkthrough without first having to answer wrong.
-    # Off by default — this is additional AI-call surface (2 more calls
-    # per tutorial, on top of MAX_SESSION_ATTEMPTS's own spend) that a
-    # self-hoster should opt into deliberately rather than get for free.
-    # Only gates *new* tutorial requests (POST /s/{token}/tutorial); a
-    # tutorial already in progress when this flips off is still allowed
-    # to be explained back.
-    enable_tutorial: bool = False
+    # Number of questions on the exam sheet, including the fixed high-level
+    # first question (app/grading.py's HIGH_LEVEL_QUESTION). The model writes
+    # the remaining EXAM_QUESTION_COUNT - 1, each scoped to a specific part
+    # of the diff.
+    exam_question_count: int = Field(default=5, ge=1)
 
-    # Whether a failed verdict's `reasoning` uses the scathing, sarcastic
-    # "grumpy" roast persona (RealGrader's comparison prompt, app/grading.py)
+    # How many answers must be marked correct for the session to pass. Graded
+    # leniently (high-level acceptance — see app/grading.py). Validated below
+    # to be between 1 and EXAM_QUESTION_COUNT.
+    passingmarks: int = Field(default=3, ge=1)
+
+    # Whether a failed mark's note/reasoning uses the scathing, sarcastic
+    # "grumpy" roast persona (RealGrader's marking prompt, app/grading.py)
     # or a direct, professional tone instead. Off by default — a fresh
     # deployment (e.g. an enterprise self-hoster) gets the professional tone
     # with zero config; opt into the roast explicitly with MEANIEMODE=true.
     meaniemode: bool = False
-
-    # How strictly an answer is graded, for any repo not named in
-    # GRUMPY_REPO_STRICTNESS below. 'standard' is the original grading
-    # rule; 'lenient' fails only answers that are wrong; 'strict' also
-    # fails answers that are vague or skip a significant part of the
-    # change. Changes pass/fail, not tone — that's MEANIEMODE.
-    grading_strictness: Strictness = "standard"
-
-    # Per-repo overrides of GRADING_STRICTNESS, e.g.
-    # 'octo/scratch=lenient,octo/payments=strict'. Server-side on purpose:
-    # a knob in the workflow file would let a PR loosen its own gate.
-    # Resolved when an answer is graded, not when the session is created,
-    # so a change applies to sessions already open; each answer row
-    # records the level it was actually graded at.
-    grumpy_repo_strictness: str | None = Field(
-        default=None,
-        description=(
-            "Optional comma-separated 'owner/name=level' overrides of "
-            "GRADING_STRICTNESS, where level is lenient, standard or strict."
-        ),
-    )
 
     # Checks that reject a PR at POST /sessions, before any question is
     # asked — see app/evaluator.py. A JSON string, e.g.
@@ -349,17 +306,12 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_repo_strictness(self) -> Settings:
-        bad = sorted(
-            f"{repo}={level}"
-            for repo, level in _parse_repo_strictness(self.grumpy_repo_strictness).items()
-            if not _REPO_SHAPE_RE.match(repo) or level not in _STRICTNESS_LEVELS
-        )
-        if bad:
+    def _validate_passingmarks(self) -> Settings:
+        if self.passingmarks > self.exam_question_count:
             raise ValueError(
-                "GRUMPY_REPO_STRICTNESS contains invalid entries (must be "
-                f"'owner/name=level', level one of {', '.join(_STRICTNESS_LEVELS)}): "
-                f"{', '.join(bad)}"
+                f"PASSINGMARKS ({self.passingmarks}) is greater than "
+                f"EXAM_QUESTION_COUNT ({self.exam_question_count}) — the sheet "
+                "could never be passed"
             )
         return self
 
@@ -407,11 +359,12 @@ class Settings(BaseSettings):
         """The parsed EVALUATOR, already validated at startup."""
         return _parse_evaluator(self.evaluator)
 
-    def strictness_for(self, repo: str) -> Strictness:
-        """The grading strictness for `repo`: its GRUMPY_REPO_STRICTNESS
-        override if it has one, otherwise GRADING_STRICTNESS."""
-        overrides = _parse_repo_strictness(self.grumpy_repo_strictness)
-        return overrides.get(repo, self.grading_strictness)  # type: ignore[return-value]
+    def passing_marks_for(self, question_count: int) -> int:
+        """PASSINGMARKS, clamped to the number of questions actually on the
+        sheet. generate_exam can return fewer than EXAM_QUESTION_COUNT for a
+        terse diff; without the clamp a sheet shorter than PASSINGMARKS could
+        never be passed."""
+        return min(self.passingmarks, question_count)
 
 
 def get_settings() -> Settings:

@@ -34,13 +34,18 @@ async def run_case(case: dict) -> tuple[bool, str]:
         api_key=os.environ.get("MODEL_API_KEY", ""),
         client_factory=lambda: httpx.AsyncClient(transport=CassetteTransport(key)),
     )
+    # Each case is graded as a one-question exam sheet: the mark on that
+    # single answer is the verdict. grade_exam marks against a blind
+    # interpretation of the diff, the same two-call shape the old grade()
+    # used, so the recorded cassettes stay valid.
     try:
-        result = await grader.grade(case["diff"], case["question"], case["answer"])
+        result = await grader.grade_exam(case["diff"], [case["question"]], [case["answer"]])
     except GradingError as exc:
         return False, f"GRADING ERROR: {exc}"
 
-    ok = result.passed == case["expected_passed"]
-    detail = f"passed={result.passed} expected={case['expected_passed']} reasoning={result.reasoning!r}"
+    passed = result.score >= 1
+    ok = passed == case["expected_passed"]
+    detail = f"passed={passed} expected={case['expected_passed']} reasoning={result.reasoning!r}"
     return ok, detail
 
 

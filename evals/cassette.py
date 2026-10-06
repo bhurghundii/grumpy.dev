@@ -3,8 +3,8 @@ hash of (diff, question, answer), so `make eval` is fast and free on
 repeat runs. Delete the case's cassette file under evals/cassettes/ to
 force a re-record against the real API.
 
-Each RealGrader.grade() call makes exactly two HTTP requests
-(interpretation, then comparison); a cassette stores both, in order, and
+Each RealGrader.grade_exam() call makes exactly two HTTP requests
+(interpretation, then marking); a cassette stores both, in order, and
 replays them in order on a later run.
 """
 
