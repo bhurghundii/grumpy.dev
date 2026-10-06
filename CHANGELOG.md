@@ -4,6 +4,9 @@
 
 **Changed**
 
+- A diff over `MAX_DIFF_BYTES` is now a `422` rejection that fails the
+  `grill` job, not a `413`. The non-blocking job turned the `413` into a
+  warning, so the largest PRs were the only ones that skipped grumpy.
 - The workflow's job is now called `grill` (was `ask`) and is non-blocking:
   if grumpy is unreachable or rejects the request, the job warns and still
   passes instead of failing the PR. The gate, if you want one, is still the
@@ -11,6 +14,13 @@
   remove it or switch it to `grumpy/verdict`.
 
 **Added**
+
+- `EVALUATOR`, a JSON config of checks that reject a PR before grumpy asks
+  anything. The first is `size`: more than 1000 changed lines (added +
+  removed, outside lockfiles by default) and `POST /sessions` returns `422`
+  with the reason instead of creating a session. The `grill` job comments
+  the reason on the PR and fails, the one case where it goes red. Set
+  `{"size": {"max_changed_lines": 0}}` to turn it off.
 
 - Per-repo grading strictness. `GRADING_STRICTNESS` sets the deployment-wide
   level (`lenient`, `standard` or `strict`) and `GRUMPY_REPO_STRICTNESS`

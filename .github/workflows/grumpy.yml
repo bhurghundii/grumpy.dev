@@ -9,9 +9,11 @@ name: grumpy
 # session exists, success or failure the moment the answer is graded (needs
 # GITHUB_STATUS_TOKEN on the server; see INTEGRATION.md). Make that the
 # required check. This job only opens the session and links it on the PR,
-# so it finishes in seconds and never goes red: if grumpy is unreachable or
-# rejects the request, it says so as a warning and still passes. A grumpy
-# outage should not read as "your PR is broken".
+# so it finishes in seconds. It goes red for exactly one reason: the server
+# rejected the PR itself before asking anything (the EVALUATOR checks, e.g.
+# too many changed lines), which it explains in a PR comment. Anything else
+# (grumpy unreachable, a bad request) is a warning and still passes. A
+# grumpy outage should not read as "your PR is broken".
 #
 # It used to wait for the answer here instead: poll GET /verdict for ten
 # minutes, then fail on whatever it last saw. Authors rarely answer inside
@@ -127,8 +129,31 @@ jobs:
                 --data @- \
                 "$GRUMPY_BASE_URL/sessions" || true)
 
-          # Non-blocking: a failure here is grumpy's problem, not the PR's,
-          # so warn and pass. `|| true` on curl keeps `set -e` from failing
+          # The one way this job goes red: the server rejected the PR itself
+          # (EVALUATOR's checks, e.g. too many changed lines) before asking
+          # anything. Told apart from a malformed-request 422 by the
+          # `rejection` key, which only a rejection carries.
+          rejection=""
+          if [ "$code" = "422" ]; then
+            rejection=$(jq -r '.rejection // empty' /tmp/grumpy.json 2>/dev/null || true)
+          fi
+          if [ -n "$rejection" ]; then
+            {
+              echo "rejection<<GRUMPY_EOF"
+              echo "$rejection"
+              echo "GRUMPY_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error title=grumpy rejected this PR::$rejection"
+            {
+              echo "### grumpy: REJECTED"
+              echo
+              echo "$rejection"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Anything else is grumpy's problem, not the PR's, so warn and
+          # pass. `|| true` on curl keeps `set -e` from failing
           # the step when the server can't be reached at all (code 000).
           if [ "$code" != "200" ] && [ "$code" != "201" ]; then
             echo "::warning title=grumpy unavailable::POST /sessions returned HTTP $code: $(cat /tmp/grumpy.json 2>/dev/null)"
@@ -144,22 +169,36 @@ jobs:
           echo "### grumpy: $(jq -r .status /tmp/grumpy.json)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment session link
-        if: steps.grumpy.outputs.session_url
-        # A failed comment (rate limit, token scope) loses the link but must
-        # not turn the check red; the session still exists.
+        # always(): a rejection fails the step above, and its comment is
+        # the one the author most needs to see.
+        if: always() && (steps.grumpy.outputs.session_url || steps.grumpy.outputs.rejection)
+        # A failed comment (rate limit, token scope) loses the message but
+        # must not change the job's result; the session, or the rejection
+        # in the job summary, still exists. The text arrives via env, not
+        # ${{ }} inside the script, so it can never be parsed as code.
         continue-on-error: true
         uses: actions/github-script@v9
+        env:
+          SESSION_URL: ${{ steps.grumpy.outputs.session_url }}
+          REJECTION: ${{ steps.grumpy.outputs.rejection }}
         with:
           script: |
+            const body = process.env.REJECTION
+              ? [
+                  "**grumpy** rejected this PR before asking anything:",
+                  "",
+                  `> ${process.env.REJECTION}`,
+                ]
+              : [
+                  "🧐 **grumpy** wants to check you understand this PR. Answer one question about the change:",
+                  "",
+                  process.env.SESSION_URL,
+                  "",
+                  "Your answer is graded, and the result shows up as the `grumpy/verdict` check on this PR.",
+                ];
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: [
-                "🧐 **grumpy** wants to check you understand this PR. Answer one question about the change:",
-                "",
-                `${{ steps.grumpy.outputs.session_url }}`,
-                "",
-                "Your answer is graded, and the result shows up as the `grumpy/verdict` check on this PR.",
-              ].join("\n"),
+              body: body.join("\n"),
             });

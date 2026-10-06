@@ -120,17 +120,22 @@ jobs:
           git diff "$BASE_SHA...$HEAD_SHA" > /tmp/grumpy.diff
           # ... POST /sessions with that diff, on every run (it's
           # idempotent). On a 201, output the session URL for the next step.
-          # On any other result, ::warning and exit 0 — never fail the PR.
+          # On a 422 carrying `rejection`, output it, ::error and exit 1.
+          # On any other result, ::warning and exit 0.
 
       - name: Comment session link
-        if: steps.grumpy.outputs.session_url
+        if: always() && (steps.grumpy.outputs.session_url || steps.grumpy.outputs.rejection)
         continue-on-error: true
-        # ... comment the session URL on the PR
+        # ... comment the session URL, or the rejection reason, on the PR
 ```
 
-The job itself finishes in seconds and never goes red: if grumpy is
-unreachable or rejects the request, it warns and passes, because a grumpy
-outage is not something the PR author can fix. It is not the gate.
+The job itself finishes in seconds and goes red for one reason only: the
+server rejected the PR outright, before asking anything, because it failed
+an `EVALUATOR` check (by default, more than 1000 changed lines outside
+lockfiles). That is something the author can fix, by splitting the PR, so
+the job comments the reason and fails. If grumpy is unreachable or the
+request is otherwise refused, it warns and passes, because a grumpy outage
+is not something the PR author can fix. It is not the gate.
 `grumpy/verdict` is, and only if you require it in branch protection;
 unrequired, grumpy is advisory. (The job was called `ask` before it became
 non-blocking. If branch protection still requires `ask`, remove it.)

@@ -1,5 +1,6 @@
 """POST /sessions: creation shape, non-concurrent repeat behaviour,
-one rejection test per validated field, and the oversized-diff 413.
+one rejection test per validated field, and the EVALUATOR rejections
+(oversized diff, too many changed lines).
 
 (Genuine concurrent-request idempotency is tested separately in
 test_idempotency.py — a sequential test here proves nothing about the race.)
@@ -115,7 +116,11 @@ def test_rejects_empty_diff(grumpy_env) -> None:
     assert "diff" in fields
 
 
-def test_rejects_oversized_diff_with_413(grumpy_env) -> None:
+def _changed_lines_diff(path: str, lines: int) -> str:
+    return f"diff --git a/{path} b/{path}\n@@ -0,0 +1,{lines} @@\n" + "+x\n" * lines
+
+
+def test_rejects_oversized_diff_with_422_rejection(grumpy_env) -> None:
     body = {
         **_VALID_BODY,
         "repo": _unique_repo("bigdiff"),
@@ -126,7 +131,41 @@ def test_rejects_oversized_diff_with_413(grumpy_env) -> None:
     with TestClient(app) as client:
         response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))
 
-    assert response.status_code == 413
+    assert response.status_code == 422
+    assert "400,000-byte limit" in response.json()["rejection"]
+
+
+def test_rejects_too_many_changed_lines_without_creating_a_session(grumpy_env) -> None:
+    body = {**_VALID_BODY, "repo": _unique_repo("biglines"), "diff": _changed_lines_diff("a.py", 1001)}
+    with TestClient(app) as client:
+        response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))
+        verdict = client.get(
+            "/verdict",
+            params={"repo": body["repo"], "pr_number": body["pr_number"], "head_sha": body["head_sha"]},
+            headers=_headers(grumpy_env.token),
+        )
+
+    assert response.status_code == 422
+    assert "1,001 lines" in response.json()["rejection"]
+    assert verdict.json() == {"status": "UNKNOWN"}
+
+
+def test_lockfile_changes_do_not_count_toward_the_line_limit(grumpy_env) -> None:
+    body = {**_VALID_BODY, "repo": _unique_repo("lockfile"), "diff": _changed_lines_diff("uv.lock", 5000)}
+    with TestClient(app) as client:
+        response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))
+
+    assert response.status_code == 201
+
+
+def test_evaluator_env_sets_the_line_limit(grumpy_env, monkeypatch) -> None:
+    monkeypatch.setenv("EVALUATOR", '{"size": {"max_changed_lines": 5}}')
+    body = {**_VALID_BODY, "repo": _unique_repo("custom"), "diff": _changed_lines_diff("a.py", 6)}
+    with TestClient(app) as client:
+        response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))
+
+    assert response.status_code == 422
+    assert "5-line limit" in response.json()["rejection"]
 
 
 def test_repo_allowlist_unset_permits_any_repo(grumpy_env) -> None:
