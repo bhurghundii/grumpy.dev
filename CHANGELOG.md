@@ -35,6 +35,14 @@ Findings from a pre-release audit, fixed.
 
 **Fixed**
 
+- A startup config error no longer prints part of a secret. When a
+  cross-field check failed (e.g. `MAX_REQUEST_BODY_BYTES` below
+  `MAX_DIFF_BYTES`), the exit message dumped the input values, truncated
+  but keeping the tail of the last one, which could be `MODEL_API_KEY`,
+  into the deployment's log. `DATABASE_URL`, `GRUMPY_TOKEN`,
+  `GITHUB_STATUS_TOKEN` and `MODEL_API_KEY` are now also masked in any
+  repr of the settings.
+
 - A session that expired unanswered could never be answered. The expired
   page said to re-run the check, but the re-run's `POST /sessions` for the
   same head SHA handed back the same expired session, so `grumpy/verdict`

@@ -38,7 +38,7 @@ async def main() -> None:
     diff = FIXTURE_DIFF_PATH.read_text()
     head_sha = secrets.token_hex(20)  # 40 hex chars, fresh every run
 
-    pool = await create_pool(settings.database_url, min_size=1, max_size=1)
+    pool = await create_pool(settings.database_url.get_secret_value(), min_size=1, max_size=1)
     try:
         row, _created = await create_or_get_session(
             pool,

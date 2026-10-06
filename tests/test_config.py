@@ -46,6 +46,43 @@ def test_get_settings_wraps_weak_token_as_system_exit(monkeypatch) -> None:
         get_settings()
 
 
+def test_get_settings_error_does_not_echo_secrets(monkeypatch) -> None:
+    # A model-level validator failing used to put every input value in the
+    # exit message, which lands in the deployment's log. pydantic truncated
+    # it, but kept the tail of whichever value came last — often a secret.
+    # Which one depends on env and .env merge order, so assert the dump is
+    # gone entirely, not just that a particular secret is missing from it.
+    token = secrets.token_urlsafe(16)
+    _set_required_env(monkeypatch, token=token)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:db-password-xyz@localhost:5432/db")
+    monkeypatch.setenv("FAKE_GRADER", "false")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-ant-api03-must-not-appear-in-errors")
+    monkeypatch.setenv("GITHUB_STATUS_TOKEN", "ghp_must-not-appear-in-errors")
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "10")
+    with pytest.raises(SystemExit, match="MAX_REQUEST_BODY_BYTES") as exc_info:
+        get_settings()
+    message = str(exc_info.value)
+    assert "input_value" not in message
+    # The tails, not the whole values: a truncated dump only keeps the ends.
+    for secret in (
+        token,
+        "db-password-xyz",
+        "sk-ant-api03-must-not-appear-in-errors",
+        "ghp_must-not-appear-in-errors",
+    ):
+        assert secret[-8:] not in message
+
+
+def test_settings_repr_hides_secrets(monkeypatch) -> None:
+    token = secrets.token_urlsafe(16)
+    _set_required_env(monkeypatch, token=token)
+    monkeypatch.setenv("MODEL_API_KEY", "sk-ant-api03-hidden")
+    monkeypatch.setenv("GITHUB_STATUS_TOKEN", "ghp_hidden")
+    shown = repr(Settings())
+    for secret in (token, "u:p@", "sk-ant-api03-hidden", "ghp_hidden"):
+        assert secret not in shown
+
+
 def test_allowed_repos_unset_permits_any_repo(monkeypatch) -> None:
     _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
     settings = Settings()
