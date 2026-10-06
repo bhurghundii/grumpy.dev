@@ -208,3 +208,43 @@ def test_grading_strictness_rejects_unknown_level(monkeypatch) -> None:
     monkeypatch.setenv("GRADING_STRICTNESS", "sloppy")
     with pytest.raises(ValidationError, match="grading_strictness"):
         Settings()
+
+
+def test_evaluator_unset_uses_defaults(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    size = Settings().evaluator_config().size
+    assert size.max_changed_lines == 1000
+    assert "*.lock" in size.exclude
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_evaluator_blank_string_uses_defaults(monkeypatch, raw) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("EVALUATOR", raw)
+    assert Settings().evaluator_config().size.max_changed_lines == 1000
+
+
+def test_evaluator_partial_json_keeps_other_defaults(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("EVALUATOR", '{"size": {"max_changed_lines": 3000}}')
+    size = Settings().evaluator_config().size
+    assert size.max_changed_lines == 3000
+    assert "*.lock" in size.exclude
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not json",
+        '{"size": {"max_changed_line": 5}}',  # typo: must not silently default
+        '{"sizes": {}}',
+        '{"size": {"max_changed_lines": -1}}',
+        '{"size": {"max_changed_lines": "lots"}}',
+        '{"size": {"exclude": "*.lock"}}',
+    ],
+)
+def test_evaluator_rejects_invalid_config(monkeypatch, raw) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("EVALUATOR", raw)
+    with pytest.raises(SystemExit, match="EVALUATOR is invalid"):
+        get_settings()

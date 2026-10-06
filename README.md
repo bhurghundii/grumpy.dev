@@ -104,7 +104,8 @@ All config is environment variables, validated at startup — grumpy refuses to 
 | `MEANIEMODE` | no | `false` | Failure explanations become sarcastic and merciless instead of professional. Doesn't change pass/fail, only tone |
 | `GRADING_STRICTNESS` | no | `standard` | How hard answers are graded: `lenient` (only wrong answers fail; vague or partial ones pass), `standard`, or `strict` (vague answers, or ones that skip part of what the change does, fail too). Changes pass/fail, unlike `MEANIEMODE` |
 | `GRUMPY_REPO_STRICTNESS` | no | unset | Per-repo overrides of `GRADING_STRICTNESS`, e.g. `octo/scratch=lenient,octo/payments=strict`. Server-side so a PR can't loosen its own gate. Each answer records the level it was graded at |
-| `MAX_DIFF_BYTES` | no | `400000` | Larger diffs are rejected with `413`. Bounded by the model's context window, not by Postgres: at ~3–4 bytes per token, 400 KB is ~100k–130k tokens. Raise it much further and you accept diffs that can never be graded |
+| `EVALUATOR` | no | unset (defaults below) | JSON config for checks that reject a PR before any question is asked: `POST /sessions` returns `422` with the reason, and the `grill` job comments it on the PR and goes red. Today there is one check, `size`: `{"size": {"max_changed_lines": 1000, "exclude": ["*.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum"]}}` (those are the defaults). Changed lines are added + removed lines, not context; files matching an `exclude` glob (path or basename) don't count. `max_changed_lines: 0` turns the check off. Omitted keys keep their defaults; unknown keys or bad values fail startup |
+| `MAX_DIFF_BYTES` | no | `400000` | Larger diffs are rejected like an `EVALUATOR` check (`422`, red `grill` job). Bounded by the model's context window, not by Postgres: at ~3–4 bytes per token, 400 KB is ~100k–130k tokens. Raise it much further and you accept diffs that can never be graded |
 
 ## Self-hosting: before you make it public
 

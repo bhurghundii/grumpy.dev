@@ -34,6 +34,7 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       GRADING_STRICTNESS: ${GRADING_STRICTNESS:-standard}
       GRUMPY_REPO_STRICTNESS: ${GRUMPY_REPO_STRICTNESS:-}
+      EVALUATOR: ${EVALUATOR:-}
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:

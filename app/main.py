@@ -23,6 +23,7 @@ from app.auth import require_bearer_token
 from app.commit_status import GitHubStatusPublisher, NullStatusPublisher
 from app.config import Settings, get_settings
 from app.db import create_pool
+from app.evaluator import evaluate
 from app.grading import FakeGrader, RealGrader
 from app.logging_config import configure_logging, redact_session_token
 from app.middleware import MaxBodySizeMiddleware
@@ -215,12 +216,13 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
     settings = app.state.settings
     _require_allowed_repo(settings, payload.repo)
 
-    diff_bytes = len(payload.diff.encode("utf-8"))
-    if diff_bytes > settings.max_diff_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"diff exceeds maximum size of {settings.max_diff_bytes} bytes",
-        )
+    # Before the question and before any DB write: a rejected PR gets no
+    # session, so a smaller re-push starts clean. `rejection`, not FastAPI's
+    # `detail`, so the workflow can tell this 422 (fail the job) from a
+    # validation 422 (a malformed request — the workflow's bug, not the PR's).
+    rejection = evaluate(payload.diff, settings)
+    if rejection is not None:
+        return JSONResponse(status_code=422, content={"rejection": rejection})
 
     question = await app.state.question_generator.generate(payload.diff)
     token = secrets.token_urlsafe(32)
