@@ -1,10 +1,10 @@
-"""The developer-facing exam-sheet loop — GET /s/{token}, POST
-/s/{token}/submit — plus its error states.
+"""The developer-facing paged walkthrough — GET /s/{token}, POST
+/s/{token}/answer, POST /s/{token}/explain — one screen per question, each
+graded on submit, with retries, an on-demand explanation, and an answer
+reveal once the tries run out.
 
-FakeGrader marks an answer passed only when it contains the marker string
-"looks-good"; everything here builds on that to prove the wiring. A fresh
-sheet has EXAM_QUESTION_COUNT questions (default 5), and the session passes
-at PASSINGMARKS correct (default 3).
+Defaults: EXAM_QUESTION_COUNT=5, PASSINGMARKS=3, MAX_QUESTION_ATTEMPTS=3.
+FakeGrader marks an answer passed only when it contains "looks-good".
 """
 
 from __future__ import annotations
@@ -15,29 +15,31 @@ import secrets
 import psycopg
 from fastapi.testclient import TestClient
 
-from app.grading import HIGH_LEVEL_QUESTION, GradingError
-from app.logging_config import JsonFormatter
+from app.ai.grading import HIGH_LEVEL_QUESTION, FakeGrader, GradingError, QuestionMark
+from app.logging.config import JsonFormatter
 from app.main import app
 
 _VALID_SHA = "1" * 40
+_DIFF = (
+    "diff --git a/app/pay.py b/app/pay.py\n"
+    "--- a/app/pay.py\n"
+    "+++ b/app/pay.py\n"
+    "@@ -1,3 +1,4 @@\n"
+    " def charge(order):\n"
+    "-    process(order)\n"
+    "+    with acquire_lock(order):\n"
+    "+        process(order)\n"
+)
 
 
 def _headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _create_session(
-    client: TestClient, token: str, *, repo: str, diff: str = "diff --git a/x b/x\n+hello\n"
-) -> dict:
+def _create_session(client: TestClient, token: str, *, repo: str, diff: str = _DIFF) -> dict:
     response = client.post(
         "/sessions",
-        json={
-            "repo": repo,
-            "pr_number": 1,
-            "head_sha": _VALID_SHA,
-            "base_sha": "2" * 40,
-            "diff": diff,
-        },
+        json={"repo": repo, "pr_number": 1, "head_sha": _VALID_SHA, "base_sha": "2" * 40, "diff": diff},
         headers=_headers(token),
     )
     assert response.status_code == 201
@@ -48,77 +50,47 @@ def _token_from_url(session_url: str) -> str:
     return session_url.rsplit("/", 1)[-1]
 
 
-def _submit(client: TestClient, token: str, answers: dict[str, str], **extra):
-    """POST one exam sheet. `answers` maps answer_i -> text; `extra` adds
-    other form fields (e.g. js_active)."""
+def _answer(client: TestClient, token: str, index: int, text: str, **extra):
     return client.post(
-        f"/s/{token}/submit", data={**answers, **extra}, follow_redirects=False
+        f"/s/{token}/answer", data={"index": str(index), "answer": text, **extra}, follow_redirects=False
     )
 
 
-def _submit_same(client: TestClient, token: str, text: str, **extra):
-    """Submit the same text for every question. FakeGrader marks an answer
-    passed iff it contains 'looks-good', so 'looks-good' passes the whole
-    sheet and anything else fails it. Sends more answer_i fields than there
-    are questions; the handler reads only as many as the sheet has."""
-    return _submit(client, token, {f"answer_{i}": text for i in range(10)}, **extra)
+def _explain(client: TestClient, token: str, index: int):
+    return client.post(f"/s/{token}/explain", data={"index": str(index)}, follow_redirects=False)
 
 
-def _submit_marks(client: TestClient, token: str, n_pass: int, n_total: int = 5):
-    """A sheet with exactly n_pass correct answers (the first n_pass contain
-    the marker, the rest don't). Assumes the default EXAM_QUESTION_COUNT."""
-    answers = {
-        f"answer_{i}": ("looks-good" if i < n_pass else "nope") for i in range(n_total)
-    }
-    return _submit(client, token, answers)
+def _skip(client: TestClient, token: str, index: int):
+    return client.post(f"/s/{token}/skip", data={"index": str(index)}, follow_redirects=False)
+
+
+def _pass_screen(client: TestClient, token: str, index: int):
+    return _answer(client, token, index, "looks-good")
+
+
+def _skip_screen(client: TestClient, token: str, index: int, attempts: int = 3) -> None:
+    for _ in range(attempts):
+        _answer(client, token, index, "nope")
 
 
 def _expire(database_url: str, token: str) -> None:
     with psycopg.connect(database_url) as conn:
         conn.execute(
-            "UPDATE sessions SET expires_at = now() - interval '1 day' WHERE token = %s",
-            (token,),
+            "UPDATE sessions SET expires_at = now() - interval '1 day' WHERE token = %s", (token,)
         )
         conn.commit()
 
 
-def _answer_count(database_url: str, session_token: str) -> int:
+def _marks(database_url: str, token: str) -> dict:
     with psycopg.connect(database_url) as conn:
-        row = conn.execute(
-            """
-            SELECT count(*) FROM answers a
-            JOIN sessions s ON s.id = a.session_id
-            WHERE s.token = %s
-            """,
-            (session_token,),
-        ).fetchone()
+        row = conn.execute("SELECT marks FROM sessions WHERE token = %s", (token,)).fetchone()
+    return row[0] if row else {}
+
+
+def _status(database_url: str, token: str) -> str:
+    with psycopg.connect(database_url) as conn:
+        row = conn.execute("SELECT status FROM sessions WHERE token = %s", (token,)).fetchone()
     return row[0]
-
-
-def _answer_js_active_flags(database_url: str, session_token: str) -> list[bool | None]:
-    with psycopg.connect(database_url) as conn:
-        rows = conn.execute(
-            """
-            SELECT a.js_active FROM answers a
-            JOIN sessions s ON s.id = a.session_id
-            WHERE s.token = %s
-            ORDER BY a.created_at
-            """,
-            (session_token,),
-        ).fetchall()
-    return [row[0] for row in rows]
-
-
-def _set_latest_answer_reasoning(database_url: str, token: str, reasoning: str) -> None:
-    """FakeGrader's reasoning is fixed, so markdown/script-bearing content
-    (which only a real grader would produce from a crafted diff) is written
-    directly, the same way _expire reaches past the API to set up state."""
-    with psycopg.connect(database_url) as conn:
-        conn.execute(
-            "UPDATE answers SET reasoning = %s WHERE session_id = (SELECT id FROM sessions WHERE token = %s)",
-            (reasoning, token),
-        )
-        conn.commit()
 
 
 _PASTE_GUARD_TAG = '<script src="/static/nopaste.js" defer></script>'
@@ -128,35 +100,73 @@ def _without_paste_guard(html: str) -> str:
     return html.replace(_PASTE_GUARD_TAG, "")
 
 
-# --- the core loop ------------------------------------------------------
+# --- the screen, retries, reveal ----------------------------------------
 
 
-def test_sheet_renders_the_high_level_question_first(grumpy_env) -> None:
-    repo = f"octo/sheet-{secrets.token_hex(4)}"
+def test_first_screen_is_the_high_level_question_with_both_buttons(grumpy_env) -> None:
+    repo = f"octo/first-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
         page = client.get(f"/s/{token}")
 
-    assert page.status_code == 200
+    assert "Question 1 of 5" in page.text
     assert HIGH_LEVEL_QUESTION in page.text
-    assert "FAKE scoped question" in page.text
-    assert page.text.count("<textarea") == 5  # EXAM_QUESTION_COUNT default
+    assert "acquire_lock" in page.text  # whole diff on the high-level screen
+    assert "Submit answer" in page.text
+    assert "Explain it for me" in page.text
 
 
-def test_full_path_pass(grumpy_env) -> None:
+def test_wrong_answer_keeps_the_screen_open_for_another_try(grumpy_env, database_url: str) -> None:
+    repo = f"octo/retry-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        assert _answer(client, token, 0, "no idea").status_code == 303
+        page = client.get(f"/s/{token}", params={"step": 0})
+
+    assert "Not quite" in page.text
+    assert "missing 'looks-good'" in page.text
+    assert "Attempt 2 of 3" in page.text
+    assert "<textarea" in page.text  # still answerable
+    assert _marks(database_url, token)["0"]["state"] == "open"
+
+
+def test_correct_answer_marks_passed_and_advances(grumpy_env, database_url: str) -> None:
+    repo = f"octo/correct-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _pass_screen(client, token, 0)
+        page = client.get(f"/s/{token}", params={"step": 0})
+
+    assert "Correct" in page.text
+    assert 'href="?step=1"' in page.text
+    assert _marks(database_url, token)["0"]["state"] == "passed"
+
+
+def test_out_of_tries_reveals_the_answer_and_skips(grumpy_env, database_url: str) -> None:
+    repo = f"octo/reveal-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _skip_screen(client, token, 0)  # 3 wrong tries
+        page = client.get(f"/s/{token}", params={"step": 0})
+
+    assert "Out of tries" in page.text
+    assert "FAKE reference answer 1" in page.text
+    assert "<textarea" not in _without_paste_guard(page.text)  # no more answering
+    marks = _marks(database_url, token)
+    assert marks["0"]["state"] == "skipped"
+    assert len(marks["0"]["attempts"]) == 3
+
+
+def test_passes_at_three_correct(grumpy_env, database_url: str) -> None:
     repo = f"octo/pass-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        submit = _submit_same(client, token, "looks-good, this makes sense to me")
-        assert submit.status_code == 303
-        assert submit.headers["location"] == f"/s/{token}"
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for i in (0, 1, 2):
+            _pass_screen(client, token, i)
 
         result = client.get(f"/s/{token}")
         assert "PASSED" in result.text
+        assert "3 of 5 correct" in result.text
 
         verdict = client.get(
             "/verdict",
@@ -165,328 +175,254 @@ def test_full_path_pass(grumpy_env) -> None:
         )
         assert verdict.json() == {"status": "PASSED"}
 
+    assert _status(database_url, token) == "passed"
 
-def test_full_path_fail(grumpy_env, monkeypatch) -> None:
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "1")
+
+def test_fails_once_three_are_skipped(grumpy_env, database_url: str) -> None:
     repo = f"octo/fail-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        submit = _submit_same(client, token, "I have no idea what this does")
-        assert submit.status_code == 303
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for i in (0, 1, 2):  # 3 skipped of 5, only 2 left -> unreachable
+            _skip_screen(client, token, i)
         result = client.get(f"/s/{token}")
-        assert "FAILED" in result.text
 
-        verdict = client.get(
-            "/verdict",
-            params={"repo": repo, "pr_number": 1, "head_sha": _VALID_SHA},
-            headers=_headers(grumpy_env.token),
-        )
-        assert verdict.json() == {"status": "FAILED"}
+    assert "FAILED" in result.text
+    assert _status(database_url, token) == "failed"
 
 
-def test_passes_at_the_mark_threshold(grumpy_env, monkeypatch) -> None:
-    """PASSINGMARKS of EXAM_QUESTION_COUNT is enough — not every answer."""
-    monkeypatch.setenv("EXAM_QUESTION_COUNT", "5")
-    monkeypatch.setenv("PASSINGMARKS", "3")
-    repo = f"octo/threshold-pass-{secrets.token_hex(4)}"
+# --- user skip ----------------------------------------------------------
+
+
+def test_skip_reveals_the_answer_and_moves_on(grumpy_env, database_url: str) -> None:
+    repo = f"octo/skip-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        assert _skip(client, token, 0).status_code == 303
+        page = client.get(f"/s/{token}", params={"step": 0})
+        # The next question is now answerable.
+        assert _pass_screen(client, token, 1).status_code == 303
 
-        _submit_marks(client, token, n_pass=3)
+    assert "Skipped" in page.text
+    assert "FAKE reference answer 1" in page.text
+    assert "Next question" in page.text
+    assert "<textarea" not in _without_paste_guard(page.text)
+    marks = _marks(database_url, token)
+    assert marks["0"]["state"] == "skipped"
+    assert marks["0"]["by_user"] is True
+    assert marks["0"]["attempts"] == []
+    assert marks["1"]["state"] == "passed"
 
-        assert "PASSED" in client.get(f"/s/{token}").text
 
-
-def test_fails_below_the_mark_threshold(grumpy_env, monkeypatch) -> None:
-    monkeypatch.setenv("EXAM_QUESTION_COUNT", "5")
-    monkeypatch.setenv("PASSINGMARKS", "3")
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "1")
-    repo = f"octo/threshold-fail-{secrets.token_hex(4)}"
+def test_fails_once_three_are_skipped_by_the_user(grumpy_env, database_url: str) -> None:
+    repo = f"octo/skipfail-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for i in (0, 1, 2):
+            _skip(client, token, i)
+        result = client.get(f"/s/{token}")
 
-        _submit_marks(client, token, n_pass=2)
+    assert "FAILED" in result.text
+    assert "Skipped" in result.text
+    assert _status(database_url, token) == "failed"
 
-        assert "FAILED" in client.get(f"/s/{token}").text
 
-
-def test_wrong_sheet_within_cap_allows_retry(grumpy_env, database_url: str) -> None:
-    """Default MAX_SESSION_ATTEMPTS (3): a failing sheet isn't terminal — it
-    shows the per-question outcome and stays retryable."""
-    repo = f"octo/retry-{secrets.token_hex(4)}"
+def test_skip_out_of_order_is_a_noop(grumpy_env, database_url: str) -> None:
+    repo = f"octo/skipahead-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        assert _skip(client, token, 3).status_code == 303
 
-        assert _submit_same(client, token, "no idea").status_code == 303
-
-        page = client.get(f"/s/{token}")
-        assert page.status_code == 200
-        assert "Not quite" in page.text
-        assert "Missed last time" in page.text
-        assert "Submit" in page.text
-
-        assert _submit_same(client, token, "looks-good").status_code == 303
-        assert "PASSED" in client.get(f"/s/{token}").text
-
-    assert _answer_count(database_url, token) == 2
+    assert _marks(database_url, token) == {}
 
 
-def test_wrong_sheet_at_cap_boundary_is_terminal(grumpy_env, database_url: str, monkeypatch) -> None:
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "1")
-    repo = f"octo/capped-{secrets.token_hex(4)}"
+def test_skipping_a_decided_session_returns_409(grumpy_env) -> None:
+    repo = f"octo/skipdecided-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        assert _submit_same(client, token, "no idea").status_code == 303
-        assert "FAILED" in client.get(f"/s/{token}").text
-
-        second = _submit_same(client, token, "looks-good")
-        assert second.status_code == 409
-
-    assert _answer_count(database_url, token) == 1
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for i in (0, 1, 2):
+            _skip(client, token, i)
+        assert _skip(client, token, 3).status_code == 409
 
 
-def test_unlimited_attempts_never_locks(grumpy_env, monkeypatch) -> None:
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "0")
-    repo = f"octo/unlimited-{secrets.token_hex(4)}"
+# --- explain ------------------------------------------------------------
+
+
+def test_explain_shows_help_without_consuming_an_attempt(grumpy_env, database_url: str) -> None:
+    repo = f"octo/explain-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        assert _explain(client, token, 0).status_code == 303
+        page = client.get(f"/s/{token}", params={"step": 0})
 
-        for _ in range(5):
-            assert _submit_same(client, token, "still wrong").status_code == 303
+        assert "Explanation" in page.text
+        assert "FAKE explanation for" in page.text
+        assert "Attempt 1 of 3" in page.text  # explaining didn't use a try
+        assert "<textarea" in page.text  # still answerable
 
-        verdict = client.get(
-            "/verdict",
-            params={"repo": repo, "pr_number": 1, "head_sha": _VALID_SHA},
-            headers=_headers(grumpy_env.token),
-        )
-        assert verdict.json() == {"status": "PENDING"}
+        _pass_screen(client, token, 0)
+        assert "Correct" in client.get(f"/s/{token}", params={"step": 0}).text
+
+    marks = _marks(database_url, token)
+    assert marks["0"]["state"] == "passed"
+    assert len(marks["0"]["attempts"]) == 1  # the explain didn't count
 
 
-def test_double_submission_after_pass_returns_409(grumpy_env, database_url: str) -> None:
-    repo = f"octo/double-{secrets.token_hex(4)}"
+def test_explain_failure_is_502_and_records_nothing(grumpy_env, database_url: str) -> None:
+    class ExplainFails(FakeGrader):
+        async def explain(self, interpretation, question):
+            raise GradingError("model hit the 16000-token cap before finishing")
+
+    repo = f"octo/explain-fail-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        app.state.grader = ExplainFails()
+        resp = _explain(client, token, 0)
 
-        assert _submit_same(client, token, "looks-good").status_code == 303
-        assert _submit_same(client, token, "looks-good again").status_code == 409
-
-    assert _answer_count(database_url, token) == 1
-
-
-# --- error states -------------------------------------------------------
+    assert resp.status_code == 502
+    assert _marks(database_url, token) == {}
 
 
-def test_expired_session_returns_410_on_get_and_rejects_post(grumpy_env, database_url: str) -> None:
+# --- navigation + error states ------------------------------------------
+
+
+def test_cannot_skip_ahead(grumpy_env) -> None:
+    repo = f"octo/skip-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        page = client.get(f"/s/{token}", params={"step": 4})
+    assert "Question 1 of 5" in page.text
+
+
+def test_out_of_order_submit_bounces_without_recording(grumpy_env, database_url: str) -> None:
+    repo = f"octo/order-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        resp = _answer(client, token, 3, "looks-good")  # frontier is 0
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/s/{token}"
+    assert _marks(database_url, token) == {}
+
+
+def test_expired_session_returns_410(grumpy_env, database_url: str) -> None:
     repo = f"octo/expired-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
         _expire(database_url, token)
-
         assert client.get(f"/s/{token}").status_code == 410
-        assert _submit_same(client, token, "looks-good").status_code == 410
-
-    assert _answer_count(database_url, token) == 0
-
-
-def test_rerun_after_expiry_issues_a_fresh_link(grumpy_env, database_url: str) -> None:
-    repo = f"octo/expired-rerun-{secrets.token_hex(4)}"
-    with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        old_token = _token_from_url(created["session_url"])
-        _expire(database_url, old_token)
-
-        rerun = _create_session(client, grumpy_env.token, repo=repo)
-        new_token = _token_from_url(rerun["session_url"])
-
-        assert new_token != old_token
-        assert client.get(f"/s/{old_token}").status_code == 404
-        assert client.get(f"/s/{new_token}").status_code == 200
-
-        again = client.post(
-            "/sessions",
-            json={
-                "repo": repo,
-                "pr_number": 1,
-                "head_sha": _VALID_SHA,
-                "base_sha": "2" * 40,
-                "diff": "diff --git a/x b/x\n+hello\n",
-            },
-            headers=_headers(grumpy_env.token),
-        )
-        assert again.status_code == 200
-        assert again.json()["session_url"] == rerun["session_url"]
+        assert _answer(client, token, 0, "looks-good").status_code == 410
+        assert _explain(client, token, 0).status_code == 410
+    assert _marks(database_url, token) == {}
 
 
 def test_unknown_token_returns_generic_404(grumpy_env) -> None:
-    unknown_token = secrets.token_urlsafe(32)
+    unknown = secrets.token_urlsafe(32)
     with TestClient(app) as client:
-        response = client.get(f"/s/{unknown_token}")
-
+        response = client.get(f"/s/{unknown}")
     assert response.status_code == 404
     assert "expired" not in response.text.lower()
-    assert unknown_token not in response.text
+    assert unknown not in response.text
 
 
-def test_empty_answer_rerenders_form_with_error_and_writes_no_row(grumpy_env, database_url: str) -> None:
+def test_answering_a_decided_session_returns_409(grumpy_env) -> None:
+    repo = f"octo/decided-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for i in (0, 1, 2):
+            _pass_screen(client, token, i)  # passed
+        assert _answer(client, token, 3, "looks-good").status_code == 409
+
+
+def test_empty_answer_rerenders_with_error_and_no_attempt(grumpy_env, database_url: str) -> None:
     repo = f"octo/empty-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        # One blank answer; the rest filled.
-        answers = {f"answer_{i}": "looks-good" for i in range(5)}
-        answers["answer_2"] = "   "
-        response = _submit(client, token, answers)
-
-    assert response.status_code == 422
-    assert "answer every question" in response.text
-    assert _answer_count(database_url, token) == 0
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        resp = _answer(client, token, 0, "   ")
+    assert resp.status_code == 422
+    assert "Write an answer" in resp.text
+    assert _marks(database_url, token) == {}
 
 
-def test_sheet_over_max_length_rerenders_with_error_and_writes_no_row(
-    grumpy_env, database_url: str, monkeypatch
-) -> None:
+def test_oversized_answer_rerenders_with_error(grumpy_env, database_url: str, monkeypatch) -> None:
     monkeypatch.setenv("MAX_ANSWER_BYTES", "10")
     repo = f"octo/toolong-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        response = _submit_same(client, token, "way over ten bytes")
-
-    assert response.status_code == 422
-    assert "too long" in response.text
-    assert _answer_count(database_url, token) == 0
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        resp = _answer(client, token, 0, "way over the ten byte limit")
+    assert resp.status_code == 422
+    assert "too long" in resp.text
+    assert _marks(database_url, token) == {}
 
 
 # --- rendering / escaping ------------------------------------------------
 
 
-def test_diff_with_script_tag_is_escaped(grumpy_env) -> None:
+def test_diff_is_escaped_on_the_screen(grumpy_env) -> None:
     repo = f"octo/escape-{secrets.token_hex(4)}"
-    malicious_diff = "diff --git a/x b/x\n+<script>alert(1)</script>\n"
+    diff = "diff --git a/x b/x\n+<script>alert(1)</script>\n"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo, diff=malicious_diff)
-        token = _token_from_url(created["session_url"])
-
+        token = _token_from_url(
+            _create_session(client, grumpy_env.token, repo=repo, diff=diff)["session_url"]
+        )
         page = client.get(f"/s/{token}")
-
     assert "<script>alert(1)</script>" not in _without_paste_guard(page.text)
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
 
 
-def test_answer_markdown_is_rendered_on_result_page(grumpy_env) -> None:
-    repo = f"octo/answer-md-{secrets.token_hex(4)}"
+def test_developer_answer_is_escaped_on_a_passed_screen(grumpy_env) -> None:
+    repo = f"octo/ans-escape-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        _submit_same(client, token, "looks-good, and **this part** is bold")
-        result = client.get(f"/s/{token}")
-
-    assert "<strong>this part</strong>" in result.text
-    assert "**this part**" not in result.text
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _answer(client, token, 0, "looks-good <script>alert(2)</script>")  # passes, shown back
+        page = client.get(f"/s/{token}", params={"step": 0})
+    assert "<script>alert(2)" not in _without_paste_guard(page.text)
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in page.text
 
 
-def test_answer_script_tag_is_stripped_on_result_page(grumpy_env, monkeypatch) -> None:
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "1")
-    repo = f"octo/answer-xss-{secrets.token_hex(4)}"
+def test_note_markdown_is_rendered_and_sanitized(grumpy_env) -> None:
+    class MarkdownNoteGrader(FakeGrader):
+        async def grade_answer(self, interpretation, question, answer):
+            return QuestionMark(passed=False, note="**bad** <script>alert(1)</script>")
+
+    repo = f"octo/note-md-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        _submit_same(client, token, "no idea <script>alert(1)</script>")
-        result = client.get(f"/s/{token}")
-
-    assert "<script" not in result.text
-
-
-def test_previous_reasoning_markdown_is_rendered_and_sanitized(grumpy_env, database_url: str) -> None:
-    repo = f"octo/reasoning-md-{secrets.token_hex(4)}"
-    with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        _submit_same(client, token, "no idea")  # fails, stays pending (cap 3)
-        _set_latest_answer_reasoning(
-            database_url,
-            token,
-            "You said `foo()` does X, but the diff shows <script>alert(1)</script> Y instead.",
-        )
-
-        page = client.get(f"/s/{token}")
-
-    assert "<code>foo()</code>" in page.text
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        app.state.grader = MarkdownNoteGrader()
+        _answer(client, token, 0, "whatever")  # wrong -> note shown on open screen
+        page = client.get(f"/s/{token}", params={"step": 0})
+    assert "<strong>bad</strong>" in page.text
     assert "<script" not in _without_paste_guard(page.text)
 
 
-def test_result_page_reasoning_markdown_is_rendered_and_sanitized(
-    grumpy_env, database_url: str, monkeypatch
-) -> None:
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "1")
-    repo = f"octo/result-reasoning-md-{secrets.token_hex(4)}"
-    with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        _submit_same(client, token, "no idea")  # terminal fail at cap 1
-        _set_latest_answer_reasoning(
-            database_url, token, "**Wrong**: <script>alert(1)</script> see above"
-        )
-
-        result = client.get(f"/s/{token}")
-
-    assert "<strong>Wrong</strong>" in result.text
-    assert "<script" not in result.text
+# --- paste / copy guard -------------------------------------------------
 
 
-# --- paste guard (app/static/nopaste.js) --------------------------------
-
-
-def test_paste_guard_script_is_served_as_javascript(grumpy_env) -> None:
+def test_guard_script_blocks_copy_and_paste(grumpy_env) -> None:
     with TestClient(app) as client:
         response = client.get("/static/nopaste.js")
-
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
-    assert response.headers["X-Content-Type-Options"] == "nosniff"
-    assert "insertFromPaste" in response.text
+    assert "insertFromPaste" in response.text  # paste blocking
+    assert '"copy"' in response.text and '"cut"' in response.text  # copy blocking
 
 
-def test_paste_guard_is_loaded_once_on_the_exam_page(grumpy_env) -> None:
+def test_guard_loaded_once_on_the_screen(grumpy_env) -> None:
     repo = f"octo/guard-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        page = client.get(f"/s/{_token_from_url(created['session_url'])}")
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        page = client.get(f"/s/{token}")
     assert "<textarea" in page.text
     assert page.text.count(_PASTE_GUARD_TAG) == 1
 
 
-def test_sheet_records_whether_the_paste_guard_ran(grumpy_env, database_url: str) -> None:
+def test_attempt_records_whether_the_paste_guard_ran(grumpy_env, database_url: str) -> None:
     repo = f"octo/guard-flag-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
-        _submit_same(client, token, "no idea", js_active="1")
-        unguarded = _submit_same(client, token, "looks-good")
-        assert unguarded.status_code == 303
-        assert "PASSED" in client.get(f"/s/{token}").text
-
-    assert _answer_js_active_flags(database_url, token) == [True, False]
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _answer(client, token, 0, "no idea", js_active="1")
+        _answer(client, token, 0, "nope")  # no js_active, same screen (still open)
+    attempts = _marks(database_url, token)["0"]["attempts"]
+    assert attempts[0]["js_active"] is True
+    assert attempts[1]["js_active"] is False
 
 
 def test_unguarded_submission_is_logged_without_the_token(grumpy_env) -> None:
@@ -498,60 +434,49 @@ def test_unguarded_submission_is_logged_without_the_token(grumpy_env) -> None:
 
     repo = f"octo/guard-log-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
         handler = Capture()
         handler.setFormatter(JsonFormatter())
         root = logging.getLogger()
         root.addHandler(handler)
         try:
-            _submit_same(client, token, "no idea", js_active="1")
-            _submit_same(client, token, "looks-good")
+            _answer(client, token, 0, "no idea", js_active="1")
+            _answer(client, token, 0, "nope")  # unguarded
         finally:
             root.removeHandler(handler)
 
     no_js = [line for line in emitted if '"outcome": "no_js"' in line]
-    assert len(no_js) == 1, "only the submission without js_active is logged"
-    assert "/s/<redacted>/submit" in no_js[0]
-    assert repo in no_js[0]
+    assert len(no_js) == 1
+    assert "/s/<redacted>/answer" in no_js[0]
     assert token not in "\n".join(emitted)
 
 
-def test_grading_failure_logs_why_and_returns_502(grumpy_env, monkeypatch) -> None:
-    """The developer is told only "please try again", by design — so if this
-    line doesn't carry the cause, nothing does."""
+def test_grading_failure_logs_why_and_returns_502(grumpy_env, database_url: str) -> None:
+    class FailingGrader(FakeGrader):
+        async def grade_answer(self, interpretation, question, answer):
+            raise GradingError("model hit the 16000-token cap before finishing")
+
     emitted: list[str] = []
 
     class Capture(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             emitted.append(self.format(record))
 
-    class FailingGrader:
-        async def generate_exam(self, diff, count):
-            return [HIGH_LEVEL_QUESTION, "q2", "q3", "q4", "q5"]
-
-        async def grade_exam(self, diff, questions, answers):
-            raise GradingError("model hit the 16000-token cap before finishing")
-
     repo = f"octo/grade-fail-{secrets.token_hex(4)}"
     with TestClient(app) as client:
-        created = _create_session(client, grumpy_env.token, repo=repo)
-        token = _token_from_url(created["session_url"])
-
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
         app.state.grader = FailingGrader()
         handler = Capture()
         handler.setFormatter(JsonFormatter())
         root = logging.getLogger()
         root.addHandler(handler)
         try:
-            response = _submit_same(client, token, "looks-good")
+            resp = _answer(client, token, 0, "anything")
         finally:
             root.removeHandler(handler)
 
-    assert response.status_code == 502
+    assert resp.status_code == 502
     failures = [line for line in emitted if '"outcome": "grade_failed"' in line]
     assert len(failures) == 1
     assert "16000-token cap" in failures[0]
-    assert repo in failures[0]
-    assert token not in "\n".join(emitted)
+    assert _marks(database_url, token) == {}  # nothing recorded on a failed grade

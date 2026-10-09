@@ -1,10 +1,5 @@
-"""Pure-ASGI middleware for the public v1 release.
-
-Not `@app.middleware("http")`/`BaseHTTPMiddleware` — Starlette buffers the
-body before that style ever sees it, which is exactly the gap this closes.
-This has to intercept `receive()` itself, at the raw ASGI level, before
-Starlette/Pydantic ever turns the body into a Python object.
-"""
+"""Pure-ASGI middleware. BaseHTTPMiddleware buffers the body before it sees it,
+so size limits have to intercept `receive()` directly."""
 
 from __future__ import annotations
 
@@ -17,29 +12,14 @@ class _BodyTooLarge(Exception):
 
 
 class MaxBodySizeMiddleware:
-    """Rejects a request body over `settings.max_request_body_bytes` with a
-    413, before the body is buffered into memory downstream.
+    """Reject a body over `settings.max_request_body_bytes` with a 413 before it
+        is buffered.
 
-    The limit is read from `scope["app"].state.settings` at request time,
-    not at construction time: `Settings` is deliberately built lazily
-    inside the FastAPI lifespan handler (see app/config.py), not at import
-    time, and this middleware is wired in before that ever runs.
-
-    Two layers, since a client can't be trusted to be honest about
-    Content-Length:
-      1. If Content-Length is present and already over the limit, reject
-         immediately without reading anything off the wire.
-      2. Otherwise (or if the client lies and sends more than it declared),
-         count bytes as they actually arrive via `receive()` and abort as
-         soon as the running total crosses the limit — this is what
-         actually bounds memory, since Content-Length is a client-supplied
-         claim, not a guarantee.
-
-    Must be the innermost middleware in the stack (wired in via
-    `app.add_middleware()` before any `@app.middleware("http")` handlers
-    are declared) — see the comment in app/main.py next to where this is
-    added for why.
-    """
+        The limit is read at request time because Settings is built in the
+        lifespan handler. A Content-Length over the limit is rejected immediately;
+        otherwise bytes are counted as they arrive, since Content-Length is only a
+        claim. Must be the innermost middleware (see app/main.py).
+        """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app

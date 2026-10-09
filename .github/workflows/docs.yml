@@ -1,0 +1,39 @@
+name: docs
+
+# Builds the MkDocs site on every PR (so broken links and config fail early)
+# and publishes it to GitHub Pages from main.
+on:
+  push:
+    branches: [main]
+    paths: [docs/**, mkdocs.yml, pyproject.toml, uv.lock, .github/workflows/docs.yml]
+  pull_request:
+    paths: [docs/**, mkdocs.yml, pyproject.toml, uv.lock, .github/workflows/docs.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv run --python 3.13 --only-group docs mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push'
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from app.logging_config import JsonFormatter, configure_logging, redact_session_token
+from app.logging.config import JsonFormatter, configure_logging, redact_session_token
 
 _TOKEN = "KgIZiNGbq9qWkoSOdz7AMaMlKEfdFDDC0tQh7t7bm3U"
 
@@ -22,7 +22,7 @@ _TOKEN = "KgIZiNGbq9qWkoSOdz7AMaMlKEfdFDDC0tQh7t7bm3U"
     ("path", "expected"),
     [
         (f"/s/{_TOKEN}", "/s/<redacted>"),
-        (f"/s/{_TOKEN}/submit", "/s/<redacted>/submit"),
+        (f"/s/{_TOKEN}/answer", "/s/<redacted>/answer"),
         # Not a session path — left alone.
         ("/healthz", "/healthz"),
         ("/sessions", "/sessions"),
@@ -38,7 +38,7 @@ def test_redacts_only_the_session_token_segment(path: str, expected: str) -> Non
 
 def test_redaction_survives_tokens_containing_url_safe_punctuation() -> None:
     # secrets.token_urlsafe() emits '-' and '_'; neither may end the match early.
-    assert redact_session_token("/s/ab-cd_ef-gh/submit") == "/s/<redacted>/submit"
+    assert redact_session_token("/s/ab-cd_ef-gh/answer") == "/s/<redacted>/answer"
 
 
 def test_uvicorn_access_logger_is_disabled() -> None:

@@ -26,8 +26,8 @@ logs:
 seed:
 	uv run python -m scripts.seed
 
-# Runs the eval cases in evals/cases/ against the real grader and prints
-# pass/fail per case. Model calls are cached in evals/cassettes/ — delete
+# Runs the eval cases in app/ai/evals/cases/ against the real grader and prints
+# pass/fail per case. Model calls are cached in app/ai/evals/cassettes/ — delete
 # a cassette to force a re-record. Needs MODEL_API_KEY set to record.
 eval:
-	uv run python -m evals.run
+	uv run python -m app.ai.evals.run

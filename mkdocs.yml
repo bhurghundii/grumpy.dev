@@ -1,0 +1,50 @@
+site_name: grumpy
+site_description: The AI that vibe checks your PRs
+site_url: https://bhurghundii.github.io/grumpy.dev/
+repo_url: https://github.com/bhurghundii/grumpy.dev
+repo_name: bhurghundii/grumpy.dev
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+  palette:
+    - scheme: slate
+      primary: deep orange
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: deep orange
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: quickstart.md
+      - How it works: how-it-works.md
+  - Using grumpy:
+      - Wire it into a repo: wire-it-up.md
+      - Blocking PRs: blocking-prs.md
+      - Configuration: configuration.md
+  - Running it:
+      - Deploying to Railway: deploy-railway.md
+      - Before you make it public: security.md
+      - Local development: development.md
+  - Limitations: limitations.md

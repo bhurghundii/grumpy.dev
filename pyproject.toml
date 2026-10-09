@@ -15,10 +15,10 @@ dependencies = [
     "python-multipart>=0.0.32",
     # Phase 1 §7's own convention: any code path that calls a model or an
     # external HTTP service must be async httpx, never a sync SDK client.
-    # First actually used by app/grading.py's RealGrader (phase 4); already
+    # First actually used by app/ai/grading.py's RealGrader (phase 4); already
     # a dev dependency since phase 2 for fastapi.testclient.TestClient.
     "httpx>=0.28.1",
-    # app/rendering.py: markdown text (tutorial breakdowns, grading
+    # app/web/rendering.py: markdown text (tutorial breakdowns, grading
     # reasoning) is rendered to HTML server-side and shown on the
     # unauthenticated /s/{token} page. `markdown` alone doesn't sanitize
     # its output, and that text ultimately traces back to a PR diff — an
@@ -33,6 +33,10 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
     "testcontainers[postgres]>=4.15.0",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocs<2",
 ]
 
 [tool.uv]

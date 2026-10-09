@@ -153,24 +153,6 @@ def test_max_request_body_bytes_below_max_answer_bytes_is_rejected(monkeypatch) 
         Settings()
 
 
-def test_max_session_attempts_default_is_three(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    settings = Settings()
-    assert settings.max_session_attempts == 3
-
-
-def test_max_session_attempts_zero_is_accepted_as_unlimited(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "0")
-    settings = Settings()
-    assert settings.max_session_attempts == 0
-
-
-def test_negative_max_session_attempts_is_rejected(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "-1")
-    with pytest.raises(ValidationError, match="MAX_SESSION_ATTEMPTS"):
-        Settings()
 
 
 def test_meaniemode_defaults_to_false(monkeypatch) -> None:
@@ -191,6 +173,15 @@ def test_exam_defaults(monkeypatch) -> None:
     settings = Settings()
     assert settings.exam_question_count == 5
     assert settings.passingmarks == 3
+    assert settings.max_question_attempts == 3
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_question_attempts_below_one_is_rejected(monkeypatch, value) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("MAX_QUESTION_ATTEMPTS", value)
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_passingmarks_over_question_count_is_rejected(monkeypatch) -> None:
