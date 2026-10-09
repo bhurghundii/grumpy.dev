@@ -1,11 +1,8 @@
-"""Request/response shapes for the phase-2 endpoints.
+"""Request shapes for the API endpoints.
 
-head_sha/base_sha require a full 40-character hex SHA — that's what GitHub
-Actions actually provides (github.sha and PR head/base SHAs are always full
-SHA-1 hashes), and it's a deliberate choice, not an oversight: the unique
-index and verdict lookups are exact-string matches, not prefix resolution,
-so accepting short SHAs alongside full ones would let the same commit
-silently produce two unrelated sessions.
+head_sha/base_sha must be full 40-character SHAs: the unique index and verdict
+lookups are exact matches, so a short SHA would create a second session for
+the same commit.
 """
 
 from __future__ import annotations

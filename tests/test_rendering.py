@@ -1,11 +1,11 @@
-"""app/rendering.py's render_markdown: pure function, no DB involved —
+"""app/web/rendering.py's render_markdown: pure function, no DB involved —
 deliberately doesn't pull in the Testcontainers-backed grumpy_env fixture
 chain, same reasoning as tests/test_config.py.
 
 The sanitization cases matter more than the conversion ones: this text
 ultimately traces back to a PR diff, an attacker-controlled input to the
 grading model, and is shown on an unauthenticated, token-in-URL page (see
-app/rendering.py's docstring) — a regression here is a live XSS vector,
+app/web/rendering.py's docstring) — a regression here is a live XSS vector,
 not just a formatting nit.
 """
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from markupsafe import Markup
 
-from app.rendering import render_markdown
+from app.web.rendering import render_markdown
 
 
 def test_bold_renders_as_strong() -> None:

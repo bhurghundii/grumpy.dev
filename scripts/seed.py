@@ -1,14 +1,6 @@
-"""make seed — inserts a session with a realistic multi-file diff directly
-into Postgres and prints the local /s/{token} URL.
-
-This is how you develop the answer-page UI: no Action, no GitHub, no
-webhook. Run it against a bare `docker compose up` (the app just needs to
-be reachable — this script talks to Postgres directly, the same way the
-real /sessions endpoint does, via create_or_get_session).
-
-A fresh random head_sha is used each run, so re-running this always gives
-you a new pending session to click through, rather than replaying whatever
-verdict the last run ended with.
+"""make seed: inserts a session with a realistic diff straight into Postgres and
+prints its /s/{token} URL, for developing the UI without an Action. Each run
+uses a fresh head_sha, so it always yields a new pending session.
 """
 
 from __future__ import annotations
@@ -18,8 +10,8 @@ import secrets
 from pathlib import Path
 
 from app.config import get_settings
-from app.db import create_pool
-from app.sessions import create_or_get_session
+from app.db.pool import create_pool
+from app.db.sessions import create_or_get_session
 
 FIXTURE_DIFF_PATH = Path(__file__).resolve().parent / "fixtures" / "sample.diff"
 
