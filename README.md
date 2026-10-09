@@ -34,14 +34,14 @@ I still think humans > AI any day though.
 
 ## Documentation
 
-Full docs live at **https://bhurghundii.github.io/grumpy/** (source in [`docs/`](docs/)):
+Full docs live at **https://bhurghundii.com/grumpy.dev/** (source in [`docs/`](docs/)):
 
-- [Quickstart](https://bhurghundii.github.io/grumpy/quickstart/): self-host it with Docker Compose
-- [How it works](https://bhurghundii.github.io/grumpy/how-it-works/)
-- [Wire it into a repo](https://bhurghundii.github.io/grumpy/wire-it-up/) and [block PRs until they pass](https://bhurghundii.github.io/grumpy/blocking-prs/)
-- [Configuration](https://bhurghundii.github.io/grumpy/configuration/)
-- [Deploying to Railway](https://bhurghundii.github.io/grumpy/deploy-railway/) and the [pre-launch security checklist](https://bhurghundii.github.io/grumpy/security/)
-- [Local development](https://bhurghundii.github.io/grumpy/development/) and [limitations](https://bhurghundii.github.io/grumpy/limitations/)
+- [Quickstart](https://bhurghundii.com/grumpy.dev/quickstart/): self-host it with Docker Compose
+- [How it works](https://bhurghundii.com/grumpy.dev/how-it-works/)
+- [Wire it into a repo](https://bhurghundii.com/grumpy.dev/wire-it-up/) and [block PRs until they pass](https://bhurghundii.com/grumpy.dev/blocking-prs/)
+- [Configuration](https://bhurghundii.com/grumpy.dev/configuration/)
+- [Deploying to Railway](https://bhurghundii.com/grumpy.dev/deploy-railway/) and the [pre-launch security checklist](https://bhurghundii.com/grumpy.dev/security/)
+- [Local development](https://bhurghundii.com/grumpy.dev/development/) and [limitations](https://bhurghundii.com/grumpy.dev/limitations/)
 
 ## Quick look
 
