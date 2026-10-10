@@ -25,6 +25,12 @@ templates.env.filters["markdown"] = render_markdown
 router = APIRouter()
 logger = logging.getLogger("grumpy.web")
 
+# (session id, question index) pairs with a model call in flight. A second
+# request for the same screen bounces instead of paying for a duplicate call.
+# Per-process only: it narrows duplicate spend on one replica but does not stop
+# it across replicas. record_attempt's row lock is what keeps results correct.
+_in_flight: set[tuple[object, int]] = set()
+
 _NOT_FOUND = {"heading": "Not found", "message": "This link isn't valid."}
 _EXPIRED = {
     "heading": "This session expired",
@@ -282,6 +288,10 @@ async def submit_answer(request: Request, token: str) -> HTMLResponse:
             422,
         )
 
+    guard = (session["id"], index)
+    if guard in _in_flight:
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+    _in_flight.add(guard)
     grader = request.app.state.grader
     try:
         mark = await grader.grade_answer(
@@ -290,6 +300,8 @@ async def submit_answer(request: Request, token: str) -> HTMLResponse:
     except GradingError:
         _log_grading_failure(session, outcome="grade_failed")
         return _rerender("Grading failed — please try submitting your answer again.", 502)
+    finally:
+        _in_flight.discard(guard)
 
     _log_if_unguarded(request, session, js_active)
     status, written = await record_attempt(
@@ -342,6 +354,14 @@ async def explain_question(request: Request, token: str) -> HTMLResponse:
     if index != frontier or frontier >= len(questions):
         return RedirectResponse(url=f"/s/{token}", status_code=303)
 
+    # One explanation per screen: repeat clicks reuse the stored one, free.
+    if (marks.get(str(index)) or {}).get("explanation"):
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+
+    guard = (session["id"], index)
+    if guard in _in_flight:
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+    _in_flight.add(guard)
     grader = request.app.state.grader
     try:
         explanation = await grader.explain(
@@ -358,6 +378,8 @@ async def explain_question(request: Request, token: str) -> HTMLResponse:
             error="Couldn't generate an explanation just now — please try again.",
         )
         return templates.TemplateResponse(request, "exam.html", context, status_code=502)
+    finally:
+        _in_flight.discard(guard)
 
     await record_explanation(pool, session_id=session["id"], index=index, explanation=explanation)
     return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)

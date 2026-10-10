@@ -18,7 +18,7 @@ from app.auth.repos import require_allowed_repo
 from app.config import get_settings
 from app.db.migrations import run_migrations
 from app.db.pool import create_pool
-from app.db.sessions import build_session_url, create_or_get_session
+from app.db.sessions import build_session_url, create_or_get_session, fetch_session_by_pr
 from app.db.verdict import fetch_verdict
 from app.evaluator import evaluate, question_count_for
 from app.github.commit_status import GitHubStatusPublisher, NullStatusPublisher
@@ -161,16 +161,30 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
         return JSONResponse(status_code=422, content={"rejection": rejection})
 
     # Build the walkthrough up front so each screen grades with one model call.
-    # A failure fails this POST, and the next workflow run retries.
-    grader = app.state.grader
-    try:
-        interpretation = await grader.interpret(payload.diff)
-        questions = await grader.generate_exam(payload.diff, question_count_for(payload.diff, settings))
-    except GradingError as exc:
-        return JSONResponse(
-            status_code=502, content={"detail": f"could not build the walkthrough: {exc}"}
-        )
-    question_dicts = [asdict(q) for q in questions]
+    # A failure fails this POST, and the next workflow run retries. A session that
+    # already exists keeps its original walkthrough (create_or_get_session never
+    # rewrites it), so a re-run reuses it instead of paying for two model calls
+    # whose output would be discarded.
+    existing = await fetch_session_by_pr(
+        app.state.pool, repo=payload.repo, pr_number=payload.pr_number, head_sha=payload.head_sha
+    )
+    if existing is not None:
+        interpretation = existing["interpretation"]
+        question_dicts = existing["questions"]
+        first_question = existing["question"]
+    else:
+        grader = app.state.grader
+        try:
+            interpretation = await grader.interpret(payload.diff)
+            questions = await grader.generate_exam(
+                payload.diff, question_count_for(payload.diff, settings)
+            )
+        except GradingError as exc:
+            return JSONResponse(
+                status_code=502, content={"detail": f"could not build the walkthrough: {exc}"}
+            )
+        question_dicts = [asdict(q) for q in questions]
+        first_question = questions[0].question
     token = secrets.token_urlsafe(32)
 
     row, created = await create_or_get_session(
@@ -180,7 +194,7 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
         head_sha=payload.head_sha,
         base_sha=payload.base_sha,
         diff=payload.diff,
-        question=questions[0].question,
+        question=first_question,
         questions=question_dicts,
         interpretation=interpretation,
         token=token,

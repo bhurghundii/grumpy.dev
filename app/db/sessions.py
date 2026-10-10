@@ -98,6 +98,19 @@ async def create_or_get_session(
             return row, False
 
 
+async def fetch_session_by_pr(
+    pool: AsyncConnectionPool, *, repo: str, pr_number: int, head_sha: str
+) -> dict[str, Any] | None:
+    """The session for this (repo, PR, head SHA), if any. Lets POST /sessions skip
+    the model calls for a session that already exists."""
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _SELECT_SQL, {"repo": repo, "pr_number": pr_number, "head_sha": head_sha}
+            )
+            return await cur.fetchone()
+
+
 async def fetch_session_by_token(pool: AsyncConnectionPool, token: str) -> dict[str, Any] | None:
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:

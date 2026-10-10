@@ -482,3 +482,80 @@ def test_grading_failure_logs_why_and_returns_502(grumpy_env, database_url: str)
     assert len(failures) == 1
     assert "16000-token cap" in failures[0]
     assert _marks(database_url, token) == {}  # nothing recorded on a failed grade
+
+
+# --- model-spend guards ---------------------------------------------------
+
+
+def test_repeat_explain_reuses_the_stored_explanation(grumpy_env) -> None:
+    class CountingExplain(FakeGrader):
+        calls = 0
+
+        async def explain(self, interpretation, question):
+            type(self).calls += 1
+            return "a plain-language walkthrough"
+
+    repo = f"octo/explain-twice-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        app.state.grader = CountingExplain()
+        first = _explain(client, token, 0)
+        second = _explain(client, token, 0)
+        page = client.get(f"/s/{token}")
+
+    assert first.status_code == second.status_code == 303
+    assert CountingExplain.calls == 1
+    assert "a plain-language walkthrough" in page.text
+
+
+def test_concurrent_submits_for_one_screen_grade_once(grumpy_env) -> None:
+    import asyncio
+
+    import httpx
+
+    release = asyncio.Event()
+
+    class SlowGrader(FakeGrader):
+        calls = 0
+
+        async def grade_answer(self, interpretation, question, answer):
+            type(self).calls += 1
+            await release.wait()
+            return QuestionMark(passed=False, note="no", model="m", prompt_version="v")
+
+    repo = f"octo/inflight-{secrets.token_hex(4)}"
+
+    async def _run() -> list[int]:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                created = await client.post(
+                    "/sessions",
+                    json={
+                        "repo": repo,
+                        "pr_number": 1,
+                        "head_sha": _VALID_SHA,
+                        "base_sha": "2" * 40,
+                        "diff": _DIFF,
+                    },
+                    headers=_headers(grumpy_env.token),
+                )
+                token = _token_from_url(created.json()["session_url"])
+                app.state.grader = SlowGrader()
+                form = {"index": "0", "answer": "some answer"}
+                first = asyncio.create_task(client.post(f"/s/{token}/answer", data=form))
+                while SlowGrader.calls == 0:
+                    await asyncio.sleep(0)
+                try:
+                    # Without the in-flight guard this would also block on the slow grader.
+                    second = await asyncio.wait_for(
+                        client.post(f"/s/{token}/answer", data=form), timeout=5
+                    )
+                finally:
+                    release.set()
+                return [second.status_code, (await first).status_code]
+
+    codes = asyncio.run(_run())
+
+    assert SlowGrader.calls == 1
+    assert codes == [303, 303]

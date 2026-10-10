@@ -59,3 +59,40 @@ def test_concurrent_session_creation_is_idempotent(grumpy_env, database_url: str
         ).fetchone()
     assert row is not None
     assert row[0] == 1
+
+
+def test_rerunning_for_the_same_sha_makes_no_further_model_calls(grumpy_env) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.ai.grading import FakeGrader
+
+    class CountingGrader(FakeGrader):
+        interpret_calls = 0
+        exam_calls = 0
+
+        async def interpret(self, diff):
+            type(self).interpret_calls += 1
+            return await super().interpret(diff)
+
+        async def generate_exam(self, diff, count):
+            type(self).exam_calls += 1
+            return await super().generate_exam(diff, count)
+
+    body = {
+        "repo": f"octo/rerun-{secrets.token_hex(4)}",
+        "pr_number": 7,
+        "head_sha": "ab" * 20,
+        "base_sha": "cd" * 20,
+        "diff": "diff --git a/x b/x\n+hello\n",
+    }
+    headers = {"Authorization": f"Bearer {grumpy_env.token}"}
+
+    with TestClient(app) as client:
+        app.state.grader = CountingGrader()
+        first = client.post("/sessions", json=body, headers=headers)
+        second = client.post("/sessions", json=body, headers=headers)
+
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert first.json()["session_url"] == second.json()["session_url"]
+    assert CountingGrader.interpret_calls == 1
+    assert CountingGrader.exam_calls == 1
