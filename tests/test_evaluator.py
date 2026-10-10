@@ -8,7 +8,7 @@ import secrets
 import pytest
 
 from app.config import Settings
-from app.evaluator import count_changed_lines, evaluate
+from app.evaluator import count_changed_lines, evaluate, question_count_for
 
 
 def _file(path: str, added: int, removed: int = 0, context: int = 0) -> str:
@@ -97,3 +97,23 @@ def test_byte_check_runs_first(settings) -> None:
     settings.max_diff_bytes = 100
     reason = evaluate(_file("a.py", added=1001), settings)
     assert reason is not None and "bytes" in reason
+
+
+# --- question_count_for ---------------------------------------------------
+
+
+def _diff_with_changed_lines(n: int) -> str:
+    return _file("x.py", added=n)
+
+
+def test_a_one_line_change_gets_only_the_high_level_question(settings) -> None:
+    assert question_count_for(_diff_with_changed_lines(1), settings) == 1
+
+
+def test_questions_grow_with_the_size_of_the_change(settings) -> None:
+    assert question_count_for(_diff_with_changed_lines(15), settings) == 2
+    assert question_count_for(_diff_with_changed_lines(45), settings) == 4
+
+
+def test_question_count_never_exceeds_exam_question_count(settings) -> None:
+    assert question_count_for(_diff_with_changed_lines(900), settings) == settings.exam_question_count

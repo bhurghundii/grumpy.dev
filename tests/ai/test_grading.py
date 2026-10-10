@@ -388,3 +388,11 @@ async def test_unparseable_retry_after_falls_back(no_sleep) -> None:
     )
     await grader.grade_answer("interp", "q", "a")
     assert no_sleep == [1.0]
+
+
+def test_exam_prompt_forbids_git_metadata_and_padding() -> None:
+    from app.ai.grading import _EXAM_GEN_SYSTEM_PROMPT
+
+    prompt = _EXAM_GEN_SYSTEM_PROMPT.format(count=3)
+    assert "Never ask about git metadata" in prompt
+    assert "Never pad" in prompt

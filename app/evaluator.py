@@ -1,6 +1,8 @@
 """Checks that reject a PR at POST /sessions (a 422 with the reason) before any
 question is asked. Configured by EVALUATOR (app.config.EvaluatorConfig). Each
 check in _CHECKS returns a reason or None; the first reason wins.
+
+Also sizes the walkthrough: question_count_for() shrinks it for small diffs.
 """
 
 from __future__ import annotations
@@ -12,6 +14,10 @@ from pathlib import PurePosixPath
 from app.config import Settings
 
 _GIT_HEADER = "diff --git "
+
+# One scoped question per this many changed lines, so a one-line PR is not
+# quizzed on git headers and boilerplate for lack of anything real to ask.
+CHANGED_LINES_PER_QUESTION = 15
 
 
 def _is_excluded(path: str | None, exclude: list[str]) -> bool:
@@ -79,3 +85,10 @@ def evaluate(diff: str, settings: Settings) -> str | None:
         if reason is not None:
             return reason
     return None
+
+
+def question_count_for(diff: str, settings: Settings) -> int:
+    """Walkthrough length: the fixed high-level question plus one scoped question
+    per CHANGED_LINES_PER_QUESTION changed lines, capped at EXAM_QUESTION_COUNT."""
+    changed = count_changed_lines(diff, settings.evaluator_config().size.exclude)
+    return min(settings.exam_question_count, 1 + changed // CHANGED_LINES_PER_QUESTION)

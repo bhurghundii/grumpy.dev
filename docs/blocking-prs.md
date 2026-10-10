@@ -1,10 +1,86 @@
 # Blocking a PR until it passes
 
-1. In the repo, go to Settings -> Branches (or Settings -> Rules -> Rulesets) and add or edit a rule for your default branch.
-2. Enable "Require status checks to pass before merging".
-3. Search for and add `grumpy/verdict`. GitHub only offers a status in the search after it has been reported on at least one PR in the last week, so open a PR first if it doesn't show up.
-4. Save. Do not add `grill`: that is the workflow job that opens the session, and it passes even when grumpy is down.
+By default grumpy is advisory: the `grill` job comments a question link and passes. To make the answer gate merging, grumpy has to report a `grumpy/verdict` commit status, and GitHub has to require it. This page walks the whole path, in order.
 
-The PR then shows `grumpy/verdict` as pending until the author finishes the walkthrough, green once they answer well enough, and red if they don't. The merge button stays disabled until it is green.
+## What you need
 
-Two other things can stop a PR: a diff that trips an `EVALUATOR` check or exceeds `MAX_DIFF_BYTES` is rejected before any question is asked and turns the `grill` job red. To keep admins from merging around the gate, also enable "Do not allow bypassing the above settings" (or the ruleset equivalent).
+- A running grumpy server that GitHub's runners can reach (see [Deploying to Railway](deploy-railway.md)).
+- A public repo, or a private repo on a plan that supports branch protection or rulesets. On a free account, GitHub only offers them for public repos; the API answers "Upgrade to GitHub Pro or make this repository public". On a private repo without the plan, the status still shows on the PR but nothing stops the merge button.
+- The [workflow](wire-it-up.md) in the repo you want to gate.
+
+## 1. Create the status token
+
+grumpy posts the verdict with a GitHub token you give it. Make a fine-grained token:
+
+1. GitHub -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens -> Generate new token.
+2. Resource owner: the account or org that owns the repo. Repository access: only the repos you will gate.
+3. Repository permissions: **Commit statuses: Read and write**. Metadata read is added automatically.
+4. Set an expiry you will remember. Copy the token (it starts with `github_pat_`); GitHub shows it once.
+
+A classic token with only the `repo:status` scope also works for public repos, but it is not limited to one repo, so prefer the fine-grained one.
+
+## 2. Set the variables
+
+On the grumpy server, set `GITHUB_STATUS_TOKEN` to the token from step 1, with no quotes or trailing spaces, and redeploy. In the startup log you should see `commit status reporting enabled`; `commit status reporting disabled (GITHUB_STATUS_TOKEN unset)` means grumpy will post nothing.
+
+In the repo (Settings -> Secrets and variables -> Actions, or `gh secret set`), add two secrets:
+
+| Secret | Value |
+|---|---|
+| `GRUMPY_BASE_URL` | the server's public URL, with the scheme and no trailing slash |
+| `GRUMPY_TOKEN` | the same value as the server's `GRUMPY_TOKEN` |
+
+## 3. Open a PR and check the status appears
+
+Open a PR from a branch in the same repo (fork PRs do not get secrets). Within a minute or so:
+
+- the `grill` job passes and comments a question link;
+- the PR shows `grumpy/verdict` as **pending** with "Waiting for the PR author to answer".
+
+If no `grumpy/verdict` appears, see [Troubleshooting](#troubleshooting). Do not require it until it shows up, or every PR will be stuck.
+
+## 4. Require the check
+
+In the repo, Settings -> Branches (or Settings -> Rules -> Rulesets), add or edit a rule for your default branch, enable "Require status checks to pass before merging", and add `grumpy/verdict`. The search only lists a status once it has been reported on a PR, which is why step 3 comes first. Do not add `grill`: it opens the session and passes even when grumpy is down.
+
+You can also add it to an existing ruleset with the API, which works even before the UI lists it:
+
+```sh
+gh api -X PUT repos/OWNER/REPO/rulesets/RULESET_ID --input ruleset.json
+```
+
+with a `required_status_checks` rule in the ruleset's `rules`:
+
+```json
+{"type": "required_status_checks",
+ "parameters": {"strict_required_status_checks_policy": false,
+                "required_status_checks": [{"context": "grumpy/verdict"}]}}
+```
+
+Rulesets with no bypass actors block everyone, including you, so keep a way out until you have seen the gate work: add the repository admin role as a bypass actor in "pull request" mode, which keeps the merge button disabled by default and offers an explicit bypass.
+
+## What the author sees
+
+`grumpy/verdict` is pending until the walkthrough is decided, green once enough questions are answered well enough, and red if too many are failed. The merge button stays disabled until it is green. To see both paths, answer wrong on one PR and right on another; with `FAKE_GRADER=true`, an answer passes if it contains `looks-good`.
+
+## Things that stop or stall a PR
+
+- **Rejected diffs.** A diff that trips an `EVALUATOR` check or exceeds `MAX_DIFF_BYTES` is rejected before any question is asked and turns the `grill` job red.
+- **Expired sessions.** A session lasts `SESSION_TTL_DAYS` (default 7). After that the question link shows "This session expired", and the status stays pending, so the PR stays blocked. Pushing a new commit creates a fresh session. Raise `SESSION_TTL_DAYS` if reviews run longer than a week.
+- **Waiting costs nothing.** An unanswered verdict is a database row; there is no timer, nagging or per-day charge.
+- **Admin bypass.** To keep admins from merging around the gate, enable "Do not allow bypassing the above settings" (or remove bypass actors from the ruleset).
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `grill` warns that secrets are not set | `GRUMPY_BASE_URL` or `GRUMPY_TOKEN` missing in the repo, or the PR is from a fork |
+| `grill` passes but there is no question comment | The server returned an error; the job log has the response |
+| Question comment appears but no `grumpy/verdict` | `GITHUB_STATUS_TOKEN` unset on the server (look for the `disabled` startup line) |
+| Server log: GitHub rejected the commit status, 401 | The token is wrong, expired or revoked, or has stray quotes or spaces; create a new one and redeploy |
+| Same, 403 or 404 | The token is valid but lacks *Commit statuses: Read and write* on this repo |
+| `/healthz` returns 502 | The service is not answering: check the deploy logs, and that the domain's target port and `PORT` are both `8000` |
+| Every request returns 401 | `GRUMPY_TOKEN` differs between the server and the repo secret |
+| PR is green although you failed the quiz | `grumpy/verdict` is not a required check yet, or never reported; green `grill` is expected |
+
+Variables are read at startup, so redeploy after changing any of them. Pushing a new commit to the PR creates a new session and re-posts the status.

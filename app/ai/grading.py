@@ -17,7 +17,7 @@ from typing import Any, Protocol
 import httpx
 
 MODEL = "claude-opus-5"
-PROMPT_VERSION = "v7"
+PROMPT_VERSION = "v8"
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
@@ -44,9 +44,13 @@ You are setting a short, paged exam that checks whether a developer \
 understands a code diff they are responsible for. Each question gets its \
 own screen, which shows the slice of the diff the question is about.
 
-Write exactly {count} questions. Each must be answerable from the diff \
-alone, target a specific and different part of the change, and be anchored \
-to the lines it asks about. Ask why something is done, what would break if \
+Write up to {count} questions, fewer if the change does not have that many \
+distinct parts worth asking about. Never pad: a small change deserves a \
+small exam. Each must be answerable from the diff alone, target a specific \
+and different part of the change, and be anchored to the lines it asks \
+about. Ask only about the code or content that was actually changed. Never \
+ask about git metadata: `diff --git`, `index`, file mode, `new file`, \
+`---`/`+++` and `@@` lines are tooling output, not the developer's work. Ask why something is done, what would break if \
 it were wrong, or what a changed line now does — not yes/no questions, and \
 not ones answered by reading a single line back verbatim. Do not ask a \
 broad "what does this change do overall" question: that one is asked \
