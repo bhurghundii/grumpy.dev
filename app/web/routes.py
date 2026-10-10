@@ -38,6 +38,10 @@ _EXPIRED = {
     "heading": "This session expired",
     "message": "Re-run the check on the PR to get a fresh link.",
 }
+_RESTART_OFF = {
+    "heading": "Start over is off",
+    "message": "This deployment doesn't allow restarting. Push a new commit to get a fresh attempt.",
+}
 _ALREADY_DECIDED = {
     "heading": "Already answered",
     "message": "This session already has a verdict and can't be answered again.",
@@ -400,6 +404,8 @@ async def restart_walkthrough(request: Request, token: str) -> HTMLResponse:
 
     if session is None:
         return templates.TemplateResponse(request, "error.html", _NOT_FOUND, status_code=404)
+    if not settings.allow_restart:
+        return templates.TemplateResponse(request, "error.html", _RESTART_OFF, status_code=403)
     if session["status"] != "failed":
         return RedirectResponse(url=f"/s/{token}", status_code=303)
 
@@ -531,5 +537,6 @@ def _render_result(request: Request, session: dict, questions: list[dict], marks
             "score": passed,
             "total": len(questions),
             "token": session["token"],
+            "allow_restart": request.app.state.settings.allow_restart,
         },
     )

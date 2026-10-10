@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     # Tries per question before the answer is revealed. 1 means no retries.
     max_question_attempts: int = Field(default=3, ge=1)
 
+    # Whether a failed session shows a "Start over" button that resets it with a
+    # fresh sheet. Off by default: unlimited retries weaken the gate, so a
+    # deployment opts in.
+    allow_restart: bool = False
+
     # Sarcastic "grumpy" tone for failed marks; off gives a professional tone.
     meaniemode: bool = False
 
