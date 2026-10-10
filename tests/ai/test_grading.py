@@ -396,3 +396,13 @@ def test_exam_prompt_forbids_git_metadata_and_padding() -> None:
     prompt = _EXAM_GEN_SYSTEM_PROMPT.format(count=3)
     assert "Never ask about git metadata" in prompt
     assert "Never pad" in prompt
+
+
+@pytest.mark.anyio
+async def test_generate_exam_tells_the_model_which_questions_to_avoid() -> None:
+    from app.ai.grading import _exam_user_content
+
+    content = _exam_user_content("l1\nl2", ["Why the lock?"])
+    assert "Do not repeat them" in content
+    assert "- Why the lock?" in content
+    assert "Do not repeat them" not in _exam_user_content("l1\nl2", None)

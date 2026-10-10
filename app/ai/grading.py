@@ -184,7 +184,9 @@ class QuestionMark:
 class Grader(Protocol):
     async def interpret(self, diff: str) -> str: ...
 
-    async def generate_exam(self, diff: str, count: int) -> list[ExamQuestion]: ...
+    async def generate_exam(
+        self, diff: str, count: int, avoid: list[str] | None = None
+    ) -> list[ExamQuestion]: ...
 
     async def grade_answer(
         self, interpretation: str, question: str, answer: str
@@ -205,7 +207,9 @@ class FakeGrader:
     async def interpret(self, diff: str) -> str:
         return "FAKE interpretation"
 
-    async def generate_exam(self, diff: str, count: int) -> list[ExamQuestion]:
+    async def generate_exam(
+        self, diff: str, count: int, avoid: list[str] | None = None
+    ) -> list[ExamQuestion]:
         """High-level question, then scoped questions over equal slices of the diff."""
         questions = [
             ExamQuestion(question=HIGH_LEVEL_QUESTION, reference_answer="FAKE reference answer 1")
@@ -264,8 +268,11 @@ class RealGrader:
         except Exception as exc:  # httpx errors, timeouts, anything unexpected
             raise GradingError(f"interpretation call failed: {exc}") from exc
 
-    async def generate_exam(self, diff: str, count: int) -> list[ExamQuestion]:
-        """HIGH_LEVEL_QUESTION plus up to count-1 anchored questions; may be fewer."""
+    async def generate_exam(
+        self, diff: str, count: int, avoid: list[str] | None = None
+    ) -> list[ExamQuestion]:
+        """HIGH_LEVEL_QUESTION plus up to count-1 anchored questions; may be fewer.
+        `avoid` lists questions from an earlier attempt, so a restart asks fresh ones."""
         scoped_wanted = max(count - 1, 0)
         if scoped_wanted == 0:
             return [ExamQuestion(question=HIGH_LEVEL_QUESTION)]
@@ -275,7 +282,7 @@ class RealGrader:
                 data = await self._call(
                     client,
                     system=_EXAM_GEN_SYSTEM_PROMPT.format(count=scoped_wanted),
-                    user_content=f"Numbered diff:\n\n{_number_diff(diff)}",
+                    user_content=_exam_user_content(diff, avoid),
                     output_schema=_EXAM_QUESTIONS_SCHEMA,
                 )
                 _check_stop_reason(data)
@@ -419,6 +426,18 @@ def _extract_text(data: dict) -> str:
         if block.get("type") == "text":
             return block.get("text", "")
     raise GradingError(f"model response contained no text block: {data!r}")
+
+
+def _exam_user_content(diff: str, avoid: list[str] | None) -> str:
+    content = f"Numbered diff:\n\n{_number_diff(diff)}"
+    if avoid:
+        asked = "\n".join(f"- {q}" for q in avoid)
+        content += (
+            "\n\nThe developer has already seen these questions, and their answers were "
+            "revealed. Do not repeat them: ask about other parts of the change, or about "
+            f"the same parts from a different angle.\n{asked}"
+        )
+    return content
 
 
 def _number_diff(diff: str) -> str:
