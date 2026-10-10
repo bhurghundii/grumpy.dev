@@ -482,3 +482,187 @@ def test_grading_failure_logs_why_and_returns_502(grumpy_env, database_url: str)
     assert len(failures) == 1
     assert "16000-token cap" in failures[0]
     assert _marks(database_url, token) == {}  # nothing recorded on a failed grade
+
+
+# --- model-spend guards ---------------------------------------------------
+
+
+def test_repeat_explain_reuses_the_stored_explanation(grumpy_env) -> None:
+    class CountingExplain(FakeGrader):
+        calls = 0
+
+        async def explain(self, interpretation, question):
+            type(self).calls += 1
+            return "a plain-language walkthrough"
+
+    repo = f"octo/explain-twice-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        app.state.grader = CountingExplain()
+        first = _explain(client, token, 0)
+        second = _explain(client, token, 0)
+        page = client.get(f"/s/{token}")
+
+    assert first.status_code == second.status_code == 303
+    assert CountingExplain.calls == 1
+    assert "a plain-language walkthrough" in page.text
+
+
+def test_concurrent_submits_for_one_screen_grade_once(grumpy_env) -> None:
+    import asyncio
+
+    import httpx
+
+    release = asyncio.Event()
+
+    class SlowGrader(FakeGrader):
+        calls = 0
+
+        async def grade_answer(self, interpretation, question, answer):
+            type(self).calls += 1
+            await release.wait()
+            return QuestionMark(passed=False, note="no", model="m", prompt_version="v")
+
+    repo = f"octo/inflight-{secrets.token_hex(4)}"
+
+    async def _run() -> list[int]:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                created = await client.post(
+                    "/sessions",
+                    json={
+                        "repo": repo,
+                        "pr_number": 1,
+                        "head_sha": _VALID_SHA,
+                        "base_sha": "2" * 40,
+                        "diff": _DIFF,
+                    },
+                    headers=_headers(grumpy_env.token),
+                )
+                token = _token_from_url(created.json()["session_url"])
+                app.state.grader = SlowGrader()
+                form = {"index": "0", "answer": "some answer"}
+                first = asyncio.create_task(client.post(f"/s/{token}/answer", data=form))
+                while SlowGrader.calls == 0:
+                    await asyncio.sleep(0)
+                try:
+                    # Without the in-flight guard this would also block on the slow grader.
+                    second = await asyncio.wait_for(
+                        client.post(f"/s/{token}/answer", data=form), timeout=5
+                    )
+                finally:
+                    release.set()
+                return [second.status_code, (await first).status_code]
+
+    codes = asyncio.run(_run())
+
+    assert SlowGrader.calls == 1
+    assert codes == [303, 303]
+
+
+# --- start over -----------------------------------------------------------
+
+
+def _fail_session(client: TestClient, token: str) -> None:
+    for i in (0, 1, 2):
+        _skip_screen(client, token, i)
+
+
+def _restart(client: TestClient, token: str):
+    return client.post(f"/s/{token}/restart", follow_redirects=False)
+
+
+def test_failed_page_offers_start_over_and_passed_does_not(grumpy_env) -> None:
+    repo = f"octo/restart-btn-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        failed = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, failed)
+        failed_page = client.get(f"/s/{failed}")
+
+        other = f"octo/restart-btn-pass-{secrets.token_hex(4)}"
+        passed = _token_from_url(_create_session(client, grumpy_env.token, repo=other)["session_url"])
+        for i in range(3):
+            _pass_screen(client, passed, i)
+        passed_page = client.get(f"/s/{passed}")
+
+    assert "Start over" in failed_page.text
+    assert "Start over" not in passed_page.text
+
+
+def test_start_over_resets_a_failed_session_to_pending(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        assert _status(database_url, token) == "failed"
+
+        resp = _restart(client, token)
+        page = client.get(f"/s/{token}")
+        answered = _pass_screen(client, token, 0)
+
+    assert resp.status_code == 303
+    assert _status(database_url, token) == "pending"
+    assert "Question 1 of 5" in page.text
+    assert answered.status_code == 303
+    assert _marks(database_url, token)["0"]["state"] == "passed"
+
+
+def test_start_over_can_be_repeated_without_limit(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-many-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for _ in range(5):
+            _fail_session(client, token)
+            assert _status(database_url, token) == "failed"
+            _restart(client, token)
+            assert _status(database_url, token) == "pending"
+
+
+def test_start_over_is_a_no_op_unless_failed(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-noop-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _pass_screen(client, token, 0)
+        before = _marks(database_url, token)
+        resp = _restart(client, token)
+
+    assert resp.status_code == 303
+    assert _marks(database_url, token) == before
+    assert _status(database_url, token) == "pending"
+
+
+def test_start_over_asks_for_questions_it_has_not_asked_before(grumpy_env) -> None:
+    seen: list[list[str] | None] = []
+
+    class RecordingGrader(FakeGrader):
+        async def generate_exam(self, diff, count, avoid=None):
+            seen.append(avoid)
+            return await super().generate_exam(diff, count, avoid)
+
+    repo = f"octo/restart-avoid-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        app.state.grader = RecordingGrader()
+        _restart(client, token)
+
+    assert seen and seen[0] and HIGH_LEVEL_QUESTION in seen[0]
+
+
+def test_start_over_failure_is_502_and_leaves_the_session_failed(
+    grumpy_env, database_url: str
+) -> None:
+    class CannotWrite(FakeGrader):
+        async def generate_exam(self, diff, count, avoid=None):
+            raise GradingError("model unavailable")
+
+    repo = f"octo/restart-fail-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        app.state.grader = CannotWrite()
+        resp = _restart(client, token)
+
+    assert resp.status_code == 502
+    assert _status(database_url, token) == "failed"

@@ -4,6 +4,7 @@ submission. Unauthenticated; the token in the URL is the credential."""
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,7 +14,8 @@ from fastapi.templating import Jinja2Templates
 
 from app.ai.grading import GradingError
 from app.db.exam import record_attempt, record_explanation, skip_question
-from app.db.sessions import build_session_url, fetch_session_by_token
+from app.db.sessions import build_session_url, fetch_session_by_token, restart_session
+from app.evaluator import question_count_for
 from app.logging.config import redact_session_token
 from app.web.rendering import render_markdown
 
@@ -24,6 +26,12 @@ templates.env.filters["markdown"] = render_markdown
 
 router = APIRouter()
 logger = logging.getLogger("grumpy.web")
+
+# (session id, question index) pairs with a model call in flight. A second
+# request for the same screen bounces instead of paying for a duplicate call.
+# Per-process only: it narrows duplicate spend on one replica but does not stop
+# it across replicas. record_attempt's row lock is what keeps results correct.
+_in_flight: set[tuple[object, int]] = set()
 
 _NOT_FOUND = {"heading": "Not found", "message": "This link isn't valid."}
 _EXPIRED = {
@@ -282,6 +290,10 @@ async def submit_answer(request: Request, token: str) -> HTMLResponse:
             422,
         )
 
+    guard = (session["id"], index)
+    if guard in _in_flight:
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+    _in_flight.add(guard)
     grader = request.app.state.grader
     try:
         mark = await grader.grade_answer(
@@ -290,6 +302,8 @@ async def submit_answer(request: Request, token: str) -> HTMLResponse:
     except GradingError:
         _log_grading_failure(session, outcome="grade_failed")
         return _rerender("Grading failed — please try submitting your answer again.", 502)
+    finally:
+        _in_flight.discard(guard)
 
     _log_if_unguarded(request, session, js_active)
     status, written = await record_attempt(
@@ -342,6 +356,14 @@ async def explain_question(request: Request, token: str) -> HTMLResponse:
     if index != frontier or frontier >= len(questions):
         return RedirectResponse(url=f"/s/{token}", status_code=303)
 
+    # One explanation per screen: repeat clicks reuse the stored one, free.
+    if (marks.get(str(index)) or {}).get("explanation"):
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+
+    guard = (session["id"], index)
+    if guard in _in_flight:
+        return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+    _in_flight.add(guard)
     grader = request.app.state.grader
     try:
         explanation = await grader.explain(
@@ -358,9 +380,79 @@ async def explain_question(request: Request, token: str) -> HTMLResponse:
             error="Couldn't generate an explanation just now — please try again.",
         )
         return templates.TemplateResponse(request, "exam.html", context, status_code=502)
+    finally:
+        _in_flight.discard(guard)
 
     await record_explanation(pool, session_id=session["id"], index=index, explanation=explanation)
     return RedirectResponse(url=f"/s/{token}?step={index}", status_code=303)
+
+
+@router.post("/s/{token}/restart")
+async def restart_walkthrough(request: Request, token: str) -> HTMLResponse:
+    """Start over after a failed verdict: a fresh sheet on the same commit and link.
+
+    Unlimited by design. The questions are regenerated, avoiding the ones already
+    seen (their answers were revealed), and the blind interpretation is reused, so
+    a restart costs one model call."""
+    pool = request.app.state.pool
+    settings = request.app.state.settings
+    session = await fetch_session_by_token(pool, token)
+
+    if session is None:
+        return templates.TemplateResponse(request, "error.html", _NOT_FOUND, status_code=404)
+    if session["status"] != "failed":
+        return RedirectResponse(url=f"/s/{token}", status_code=303)
+
+    guard = (session["id"], -1)
+    if guard in _in_flight:
+        return RedirectResponse(url=f"/s/{token}", status_code=303)
+    _in_flight.add(guard)
+    try:
+        grader = request.app.state.grader
+        try:
+            fresh = await grader.generate_exam(
+                session["diff"],
+                question_count_for(session["diff"], settings),
+                avoid=[q["question"] for q in _questions(session)],
+            )
+        except GradingError:
+            _log_grading_failure(session, outcome="restart_failed")
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {
+                    "heading": "Couldn't start over",
+                    "message": "Writing a fresh set of questions failed. Try again in a moment.",
+                },
+                status_code=502,
+            )
+        restarted = await restart_session(
+            pool,
+            session_id=session["id"],
+            question=fresh[0].question,
+            questions=[asdict(q) for q in fresh],
+            ttl_days=settings.session_ttl_days,
+        )
+    finally:
+        _in_flight.discard(guard)
+
+    if restarted is not None:
+        logger.info(
+            "session restarted",
+            extra={
+                "outcome": "restarted",
+                "repo": session["repo"],
+                "pr_number": session["pr_number"],
+                "head_sha": session["head_sha"],
+            },
+        )
+        await request.app.state.status_publisher.publish(
+            repo=session["repo"],
+            head_sha=session["head_sha"],
+            status="pending",
+            target_url=build_session_url(settings.grumpy_base_url, token),
+        )
+    return RedirectResponse(url=f"/s/{token}", status_code=303)
 
 
 @router.post("/s/{token}/skip")
@@ -438,5 +530,6 @@ def _render_result(request: Request, session: dict, questions: list[dict], marks
             "items": items,
             "score": passed,
             "total": len(questions),
+            "token": session["token"],
         },
     )

@@ -23,6 +23,9 @@
   .answer pre, .reasoning pre, .note pre { padding: 0.5rem; overflow-x: auto; }
   .answer code, .reasoning code, .note code { padding: 0 0.2em; }
   .answer ul, .answer ol, .reasoning ul, .reasoning ol, .note ul, .note ol { padding-left: 1.5rem; }
+  button { padding: 0.4rem 0.9rem; border: 1px solid #ccc; border-radius: 4px; background: #fafafa; font: inherit; cursor: pointer; }
+  button:hover { background: #f0f0f0; }
+  .restart { margin-top: 1.5rem; }
   .reward { width: 5rem; height: 5rem; display: block; margin-top: 1.5rem; }
   .reward-caption { color: #1a7f37; font-weight: bold; margin-top: 0.5rem; }
 </style>
@@ -50,6 +53,12 @@
   <p class="skipped">Not reached — the result was already decided.</p>
   {% endif -%}
   {% endfor -%}
+  {% if status == "failed" -%}
+  <form class="restart" method="post" action="/s/{{ token }}/restart">
+    <button type="submit">Start over</button>
+    <p class="skipped">Same change, fresh questions. You can do this as many times as you like.</p>
+  </form>
+  {% endif -%}
   {% if status == "passed" -%}
   {# Inline SVG, not an <img>. This used to hotlink a copyrighted news-media
      meme from a third-party CDN, which put someone else's image on grumpy's
