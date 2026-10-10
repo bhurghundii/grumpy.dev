@@ -559,3 +559,110 @@ def test_concurrent_submits_for_one_screen_grade_once(grumpy_env) -> None:
 
     assert SlowGrader.calls == 1
     assert codes == [303, 303]
+
+
+# --- start over -----------------------------------------------------------
+
+
+def _fail_session(client: TestClient, token: str) -> None:
+    for i in (0, 1, 2):
+        _skip_screen(client, token, i)
+
+
+def _restart(client: TestClient, token: str):
+    return client.post(f"/s/{token}/restart", follow_redirects=False)
+
+
+def test_failed_page_offers_start_over_and_passed_does_not(grumpy_env) -> None:
+    repo = f"octo/restart-btn-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        failed = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, failed)
+        failed_page = client.get(f"/s/{failed}")
+
+        other = f"octo/restart-btn-pass-{secrets.token_hex(4)}"
+        passed = _token_from_url(_create_session(client, grumpy_env.token, repo=other)["session_url"])
+        for i in range(3):
+            _pass_screen(client, passed, i)
+        passed_page = client.get(f"/s/{passed}")
+
+    assert "Start over" in failed_page.text
+    assert "Start over" not in passed_page.text
+
+
+def test_start_over_resets_a_failed_session_to_pending(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        assert _status(database_url, token) == "failed"
+
+        resp = _restart(client, token)
+        page = client.get(f"/s/{token}")
+        answered = _pass_screen(client, token, 0)
+
+    assert resp.status_code == 303
+    assert _status(database_url, token) == "pending"
+    assert "Question 1 of 5" in page.text
+    assert answered.status_code == 303
+    assert _marks(database_url, token)["0"]["state"] == "passed"
+
+
+def test_start_over_can_be_repeated_without_limit(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-many-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        for _ in range(5):
+            _fail_session(client, token)
+            assert _status(database_url, token) == "failed"
+            _restart(client, token)
+            assert _status(database_url, token) == "pending"
+
+
+def test_start_over_is_a_no_op_unless_failed(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-noop-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _pass_screen(client, token, 0)
+        before = _marks(database_url, token)
+        resp = _restart(client, token)
+
+    assert resp.status_code == 303
+    assert _marks(database_url, token) == before
+    assert _status(database_url, token) == "pending"
+
+
+def test_start_over_asks_for_questions_it_has_not_asked_before(grumpy_env) -> None:
+    seen: list[list[str] | None] = []
+
+    class RecordingGrader(FakeGrader):
+        async def generate_exam(self, diff, count, avoid=None):
+            seen.append(avoid)
+            return await super().generate_exam(diff, count, avoid)
+
+    repo = f"octo/restart-avoid-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        app.state.grader = RecordingGrader()
+        _restart(client, token)
+
+    assert seen and seen[0] and HIGH_LEVEL_QUESTION in seen[0]
+
+
+def test_start_over_failure_is_502_and_leaves_the_session_failed(
+    grumpy_env, database_url: str
+) -> None:
+    class CannotWrite(FakeGrader):
+        async def generate_exam(self, diff, count, avoid=None):
+            raise GradingError("model unavailable")
+
+    repo = f"octo/restart-fail-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        app.state.grader = CannotWrite()
+        resp = _restart(client, token)
+
+    assert resp.status_code == 502
+    assert _status(database_url, token) == "failed"

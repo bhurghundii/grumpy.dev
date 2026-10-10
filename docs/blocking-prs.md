@@ -63,6 +63,12 @@ Rulesets with no bypass actors block everyone, including you, so keep a way out 
 
 `grumpy/verdict` is pending until the walkthrough is decided, green once enough questions are answered well enough, and red if too many are failed. The merge button stays disabled until it is green. To see both paths, answer wrong on one PR and right on another; with `FAKE_GRADER=true`, an answer passes if it contains `looks-good`.
 
+## Failing and trying again
+
+A failed verdict is not the end. The result page has a **Start over** button that resets the same session on the same commit and link: the status goes back to pending, and the author gets a fresh set of questions (grumpy asks for ones it hasn't asked before, since the failed attempt revealed the answers). There is no limit on restarts. Each one costs one model call, spent only when someone presses the button on a failed session.
+
+Pushing a new commit also creates a fresh session, as before. Because restarts are unlimited, grumpy checks understanding but cannot stop someone grinding through retries; if you need a hard limit, add one at your proxy or ask for it as a setting.
+
 ## Things that stop or stall a PR
 
 - **Rejected diffs.** A diff that trips an `EVALUATOR` check or exceeds `MAX_DIFF_BYTES` is rejected before any question is asked and turns the `grill` job red.

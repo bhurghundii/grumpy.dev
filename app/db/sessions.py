@@ -111,6 +111,38 @@ async def fetch_session_by_pr(
             return await cur.fetchone()
 
 
+_RESTART_SQL = """
+    UPDATE sessions
+    SET status = 'pending', marks = '{}'::jsonb, question = %(question)s,
+        questions = %(questions)s, expires_at = %(expires_at)s
+    WHERE id = %(id)s AND status = 'failed'
+    RETURNING *
+"""
+
+
+async def restart_session(
+    pool: AsyncConnectionPool,
+    *,
+    session_id: Any,
+    question: str,
+    questions: list[dict[str, Any]],
+    ttl_days: int,
+) -> dict[str, Any] | None:
+    """Reset a failed session to pending with a fresh sheet, keeping its row,
+    token and blind interpretation. Returns the row, or None if the session was
+    not failed (a double submit, or already restarted)."""
+    params = {
+        "id": session_id,
+        "question": question,
+        "questions": Jsonb(questions),
+        "expires_at": datetime.now(UTC) + timedelta(days=ttl_days),
+    }
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_RESTART_SQL, params)
+            return await cur.fetchone()
+
+
 async def fetch_session_by_token(pool: AsyncConnectionPool, token: str) -> dict[str, Any] | None:
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
