@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from app.logging_config import JsonFormatter, configure_logging, redact_session_token
+from app.logging.config import JsonFormatter, configure_logging, redact_session_token
 
 _TOKEN = "KgIZiNGbq9qWkoSOdz7AMaMlKEfdFDDC0tQh7t7bm3U"
 
@@ -23,8 +23,6 @@ _TOKEN = "KgIZiNGbq9qWkoSOdz7AMaMlKEfdFDDC0tQh7t7bm3U"
     [
         (f"/s/{_TOKEN}", "/s/<redacted>"),
         (f"/s/{_TOKEN}/answer", "/s/<redacted>/answer"),
-        (f"/s/{_TOKEN}/tutorial", "/s/<redacted>/tutorial"),
-        (f"/s/{_TOKEN}/tutorial/explain", "/s/<redacted>/tutorial/explain"),
         # Not a session path — left alone.
         ("/healthz", "/healthz"),
         ("/sessions", "/sessions"),

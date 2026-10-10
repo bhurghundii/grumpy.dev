@@ -1,11 +1,10 @@
-"""Unit tests for RealGrader's defensive JSON parsing and error handling.
+"""Unit tests for RealGrader: the three calls (interpret, generate_exam,
+grade_answer), their defensive JSON parsing, anchor clamping, prompt
+selection, and transient-error retries.
 
-These run against a mocked HTTP transport — no real API key, no network,
-no cost — and exist to prove gate item 4 ("a malformed model response
-surfaces an error rather than a verdict") without needing live model
-access. Grading *accuracy* — whether the two-call flow actually produces
-correct verdicts — is a different question, answered by the five real
-eval cases under evals/ (`make eval`), not by these.
+All against a mocked HTTP transport — no real API key, no network, no cost.
+Grading *accuracy* is a separate question answered by the eval cases under
+evals/ (`make eval`), not here.
 """
 
 from __future__ import annotations
@@ -15,13 +14,12 @@ import json
 import httpx
 import pytest
 
-from app import grading
-from app.grading import (
-    _COMPARISON_SYSTEM_PROMPT_MEAN,
-    _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL,
-    _GRADING_RULES,
+from app.ai import grading
+from app.ai.grading import (
+    HIGH_LEVEL_QUESTION,
     GradingError,
     RealGrader,
+    _grade_system_prompt,
 )
 
 
@@ -40,9 +38,23 @@ def _messages_response(text: str, *, stop_reason: str = "end_turn") -> httpx.Res
     )
 
 
+def _questions_response(*questions: tuple[str, int, int]) -> str:
+    return json.dumps(
+        {
+            "questions": [
+                {"question": q, "start_line": s, "end_line": e, "reference_answer": f"ref: {q}"}
+                for q, s, e in questions
+            ]
+        }
+    )
+
+
+def _mark_response(passed: bool, note: str = "a note") -> str:
+    return json.dumps({"passed": passed, "note": note})
+
+
 def _grader_with(*items: str | httpx.Response) -> RealGrader:
-    """items are consumed in order: one per HTTP call the grader makes
-    (interpretation, then comparison). A bare string becomes a normal
+    """items are consumed one per HTTP call. A bare string becomes a normal
     text response; pass an httpx.Response for anything else."""
     remaining = list(items)
 
@@ -54,385 +66,208 @@ def _grader_with(*items: str | httpx.Response) -> RealGrader:
     return RealGrader(api_key="test-key", client_factory=lambda: httpx.AsyncClient(transport=transport))
 
 
-def _grader_capturing_system(requests: list[httpx.Request], *, meaniemode: bool) -> RealGrader:
-    """Like _grader_with, but records every outgoing request (so a test can
-    inspect the `system` field actually sent) and always returns a passing
-    verdict for both calls."""
-    responses = iter(
-        [
-            _messages_response("- adds a TTL"),
-            _messages_response(json.dumps({"passed": True, "reasoning": "ok"})),
-        ]
-    )
-
+def _capturing(requests: list[httpx.Request], response_text: str, **kwargs) -> RealGrader:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return next(responses)
+        return _messages_response(response_text)
 
     transport = httpx.MockTransport(handler)
     return RealGrader(
-        api_key="test-key",
-        client_factory=lambda: httpx.AsyncClient(transport=transport),
-        meaniemode=meaniemode,
+        api_key="test-key", client_factory=lambda: httpx.AsyncClient(transport=transport), **kwargs
     )
 
 
-@pytest.mark.anyio
-async def test_grade_passes_on_clean_json() -> None:
-    grader = _grader_with(
-        "- adds a TTL to cache entries",
-        json.dumps({"passed": True, "reasoning": "matches the interpretation"}),
-    )
-    result = await grader.grade("diff", "question", "answer")
-    assert result.passed is True
-    assert result.model == "claude-opus-5"
-    assert result.prompt_version
+# --- interpret ----------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_grade_strips_code_fences() -> None:
-    grader = _grader_with(
-        "- adds a TTL",
-        "```json\n" + json.dumps({"passed": False, "reasoning": "missing the TTL"}) + "\n```",
-    )
-    result = await grader.grade("diff", "question", "answer")
-    assert result.passed is False
+async def test_interpret_returns_text() -> None:
+    grader = _grader_with("- adds a TTL to cache entries")
+    assert await grader.interpret("diff") == "- adds a TTL to cache entries"
 
 
 @pytest.mark.anyio
-async def test_grade_strips_preamble_text() -> None:
-    grader = _grader_with(
-        "- adds a TTL",
-        "Sure, here's my verdict:\n" + json.dumps({"passed": True, "reasoning": "ok"}),
-    )
-    result = await grader.grade("diff", "question", "answer")
-    assert result.passed is True
-
-
-@pytest.mark.anyio
-async def test_meaniemode_off_by_default_sends_professional_prompt() -> None:
-    requests: list[httpx.Request] = []
-    grader = _grader_capturing_system(requests, meaniemode=False)
-    await grader.grade("diff", "question", "answer")
-
-    comparison_body = json.loads(requests[1].content)
-    assert comparison_body["system"] == _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
-    assert comparison_body["system"] != _COMPARISON_SYSTEM_PROMPT_MEAN
-
-
-@pytest.mark.anyio
-async def test_meaniemode_on_sends_mean_prompt() -> None:
-    requests: list[httpx.Request] = []
-    grader = _grader_capturing_system(requests, meaniemode=True)
-    await grader.grade("diff", "question", "answer")
-
-    comparison_body = json.loads(requests[1].content)
-    assert comparison_body["system"] == _COMPARISON_SYSTEM_PROMPT_MEAN
-    assert comparison_body["system"] != _COMPARISON_SYSTEM_PROMPT_PROFESSIONAL
-
-
-@pytest.mark.anyio
-async def test_strictness_defaults_to_standard() -> None:
-    requests: list[httpx.Request] = []
-    grader = _grader_capturing_system(requests, meaniemode=False)
-    await grader.grade("diff", "question", "answer")
-
-    comparison_body = json.loads(requests[1].content)
-    assert _GRADING_RULES["standard"] in comparison_body["system"]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("strictness", ["lenient", "strict"])
-@pytest.mark.parametrize("meaniemode", [False, True])
-async def test_strictness_selects_the_grading_rule(strictness: str, meaniemode: bool) -> None:
-    """Strictness and MEANIEMODE are independent: one picks the rule, the
-    other the tone, and neither displaces the other."""
-    requests: list[httpx.Request] = []
-    grader = _grader_capturing_system(requests, meaniemode=meaniemode)
-    await grader.grade("diff", "question", "answer", strictness=strictness)
-
-    interpretation_body = json.loads(requests[0].content)
-    comparison_body = json.loads(requests[1].content)
-    assert _GRADING_RULES[strictness] in comparison_body["system"]
-    assert _GRADING_RULES["standard"] not in comparison_body["system"]
-    assert ("scathing" in comparison_body["system"]) is meaniemode
-    # The blind interpretation must not depend on how the answer is graded.
-    assert interpretation_body["system"] == grading._INTERPRETATION_SYSTEM_PROMPT
-
-
-@pytest.mark.anyio
-async def test_malformed_json_raises_grading_error() -> None:
-    grader = _grader_with("- adds a TTL", "not json at all")
-    with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
-
-
-@pytest.mark.anyio
-async def test_missing_required_field_raises_grading_error() -> None:
-    grader = _grader_with("- adds a TTL", json.dumps({"passed": True}))
-    with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
-
-
-@pytest.mark.anyio
-async def test_wrong_field_type_raises_grading_error() -> None:
-    grader = _grader_with("- adds a TTL", json.dumps({"passed": "yes", "reasoning": "ok"}))
-    with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
-
-
-@pytest.mark.anyio
-async def test_refusal_stop_reason_raises_grading_error() -> None:
-    grader = _grader_with(_messages_response("", stop_reason="refusal"))
-    with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
-
-
-@pytest.mark.anyio
-async def test_max_tokens_stop_reason_names_the_budget() -> None:
-    """A truncated response is well-formed JSON up to the cut, so without
-    this check the parser blames the model's output rather than the cap it
-    ran into. The message has to say which it was."""
-    truncated = '{"passed": true, "reason'
-    grader = _grader_with(_messages_response(truncated, stop_reason="max_tokens"))
-    with pytest.raises(GradingError, match="token cap"):
-        await grader.grade("diff", "question", "answer")
-
-
-@pytest.mark.anyio
-async def test_empty_interpretation_raises_grading_error() -> None:
+async def test_interpret_empty_raises() -> None:
     grader = _grader_with("   ")
     with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
+        await grader.interpret("diff")
 
 
 @pytest.mark.anyio
-async def test_http_error_raises_grading_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "boom"})
-
-    grader = RealGrader(
-        api_key="test-key",
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
+async def test_interpret_refusal_raises() -> None:
+    grader = _grader_with(_messages_response("", stop_reason="refusal"))
     with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
+        await grader.interpret("diff")
 
 
-# --- generate_tutorial / grade_explanation: one HTTP call each, so
-# _grader_with's single-item form is enough. grade_explanation reuses the
-# same _extract_text/_check_stop_reason/_parse_verdict helpers already
-# exercised above, so this doesn't re-run the full parser matrix for it.
-# generate_tutorial does get its own matrix below: _parse_tutorial is a
-# second parser with rules of its own — notably that a bad line anchor
-# costs a step its code slice but not its prose.
-
-_DIFF = "\n".join(f"line {n}" for n in range(1, 21))
-
-
-def _steps_response(*steps: dict) -> str:
-    return json.dumps({"steps": list(steps)})
-
-
-def _step(**overrides) -> dict:
-    return {"title": "A step", "body": "What it does.", "start_line": 2, "end_line": 4} | overrides
+# --- generate_exam ------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_returns_steps_with_model_metadata() -> None:
-    grader = _grader_with(
-        _steps_response(
-            _step(title="First", body="Sets up the lock.", start_line=2, end_line=4),
-            _step(title="Second", body="Then records the charge.", start_line=7, end_line=9),
-        )
+async def test_generate_exam_prepends_high_level_and_keeps_anchors() -> None:
+    grader = _grader_with(_questions_response(("Why the lock?", 5, 8), ("What breaks?", 2, 2)))
+    questions = await grader.generate_exam("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8", 3)
+
+    assert questions[0].question == HIGH_LEVEL_QUESTION
+    assert questions[0].start_line is None and questions[0].end_line is None
+    assert (questions[1].question, questions[1].start_line, questions[1].end_line) == (
+        "Why the lock?",
+        5,
+        8,
     )
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-
-    assert [(s.title, s.start_line, s.end_line) for s in breakdown.steps] == [
-        ("First", 2, 4),
-        ("Second", 7, 9),
-    ]
-    assert breakdown.model == "claude-opus-5"
-    assert breakdown.prompt_version
+    assert (questions[2].start_line, questions[2].end_line) == (2, 2)
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_flattens_steps_into_breakdown_text() -> None:
-    """`text` is what lands in tutorials.breakdown and what
-    grade_explanation is handed later, so it has to stay a readable prose
-    rendering of the same steps rather than raw JSON."""
+async def test_generate_exam_parses_the_reference_answer() -> None:
+    grader = _grader_with(_questions_response(("Why the lock?", 1, 2)))
+    questions = await grader.generate_exam("l1\nl2", 2)
+    assert questions[1].reference_answer == "ref: Why the lock?"
+
+
+@pytest.mark.anyio
+async def test_generate_exam_caps_scoped_questions() -> None:
     grader = _grader_with(
-        _steps_response(_step(title="First", body="Sets up."), _step(title="Second", body="Then."))
+        _questions_response(("q2", 1, 1), ("q3", 1, 1), ("q4", 1, 1), ("q5", 1, 1))
     )
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-
-    assert breakdown.text == "1. First\n\nSets up.\n\n2. Second\n\nThen."
+    questions = await grader.generate_exam("l1\nl2", 2)
+    assert [q.question for q in questions] == [HIGH_LEVEL_QUESTION, "q2"]
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_sends_schema_and_numbered_diff() -> None:
-    """The model can only anchor a step to a line range it can see, so the
-    diff goes out numbered — with the same 1-based indexing app/web.py
-    resolves those anchors against."""
-    requests: list[httpx.Request] = []
+async def test_generate_exam_tolerates_fewer() -> None:
+    grader = _grader_with(_questions_response(("only one", 1, 1)))
+    questions = await grader.generate_exam("l1\nl2", 5)
+    assert [q.question for q in questions] == [HIGH_LEVEL_QUESTION, "only one"]
 
+
+@pytest.mark.anyio
+async def test_generate_exam_count_one_makes_no_call() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return _messages_response(_steps_response(_step(), _step()))
+        raise AssertionError("no HTTP call for a one-question walkthrough")
 
     grader = RealGrader(
         api_key="test-key",
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    await grader.generate_tutorial("first line\nsecond line", "question")
+    questions = await grader.generate_exam("diff", 1)
+    assert [q.question for q in questions] == [HIGH_LEVEL_QUESTION]
+
+
+@pytest.mark.anyio
+async def test_generate_exam_clamps_and_swaps_anchors() -> None:
+    grader = _grader_with(_questions_response(("inverted", 9, 3), ("out of range", -5, 900)))
+    questions = await grader.generate_exam("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10", 3)
+    assert (questions[1].start_line, questions[1].end_line) == (3, 9)
+    assert (questions[2].start_line, questions[2].end_line) == (1, 10)
+
+
+@pytest.mark.anyio
+async def test_generate_exam_unusable_anchor_drops_to_none_but_keeps_question() -> None:
+    grader = _grader_with(json.dumps({"questions": [{"question": "q", "start_line": 99, "end_line": 99}]}))
+    questions = await grader.generate_exam("l1\nl2", 2)
+    assert questions[1].question == "q"
+    assert questions[1].start_line is None and questions[1].end_line is None
+
+
+@pytest.mark.anyio
+async def test_generate_exam_sends_numbered_diff_and_schema() -> None:
+    requests: list[httpx.Request] = []
+    grader = _capturing(requests, _questions_response(("q2", 1, 1)))
+    await grader.generate_exam("first line\nsecond line", 2)
 
     body = json.loads(requests[0].content)
     assert body["output_config"]["format"]["type"] == "json_schema"
-    assert "steps" in body["output_config"]["format"]["schema"]["properties"]
+    assert "questions" in body["output_config"]["format"]["schema"]["properties"]
     assert "1\tfirst line\n2\tsecond line" in body["messages"][0]["content"]
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_empty_response_raises_grading_error() -> None:
-    grader = _grader_with("   ")
+async def test_generate_exam_strips_a_fence() -> None:
+    grader = _grader_with(f"```json\n{_questions_response(('q2', 1, 1))}\n```")
+    questions = await grader.generate_exam("l1\nl2", 2)
+    assert [q.question for q in questions] == [HIGH_LEVEL_QUESTION, "q2"]
+
+
+@pytest.mark.anyio
+async def test_generate_exam_refusal_raises() -> None:
+    grader = _grader_with(_messages_response("", stop_reason="refusal"))
     with pytest.raises(GradingError):
-        await grader.generate_tutorial("diff", "question")
+        await grader.generate_exam("diff", 3)
+
+
+# --- grade_answer -------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_parses_steps_wrapped_in_a_code_fence() -> None:
-    grader = _grader_with(f"Here you go:\n```json\n{_steps_response(_step(), _step())}\n```")
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-    assert len(breakdown.steps) == 2
+@pytest.mark.parametrize("passed", [True, False])
+async def test_grade_answer_returns_the_mark_with_metadata(passed: bool) -> None:
+    grader = _grader_with(_mark_response(passed, note="because reasons"))
+    mark = await grader.grade_answer("interpretation", "question", "answer")
+    assert mark.passed is passed
+    assert mark.note == "because reasons"
+    assert mark.model == "claude-opus-5"
+    assert mark.prompt_version
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_swaps_inverted_line_bounds() -> None:
-    grader = _grader_with(_steps_response(_step(start_line=9, end_line=3), _step()))
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-    assert (breakdown.steps[0].start_line, breakdown.steps[0].end_line) == (3, 9)
+async def test_grade_answer_strips_fences_and_preamble() -> None:
+    grader = _grader_with("Sure:\n```json\n" + _mark_response(True) + "\n```")
+    mark = await grader.grade_answer("interp", "q", "a")
+    assert mark.passed is True
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_clamps_out_of_range_line_bounds() -> None:
-    grader = _grader_with(_steps_response(_step(start_line=-5, end_line=900), _step()))
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-    assert (breakdown.steps[0].start_line, breakdown.steps[0].end_line) == (1, 20)
-
-
-@pytest.mark.anyio
-async def test_generate_tutorial_keeps_step_whose_anchor_is_unusable() -> None:
-    """A step the model couldn't anchor still teaches something; it just
-    loses its code slice. Dropping the prose over a bad pointer would throw
-    away the part that took a model call to produce."""
-    grader = _grader_with(
-        _steps_response(_step(start_line="nonsense", end_line=None), _step(start_line=99, end_line=99))
-    )
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-
-    assert len(breakdown.steps) == 2
-    assert breakdown.steps[0].start_line is None
-    assert breakdown.steps[0].body == "What it does."
-    # Wholly past the end of the diff — clamping can't rescue it either.
-    assert breakdown.steps[1].start_line is None
-
-
-@pytest.mark.anyio
-async def test_generate_tutorial_schema_requires_a_check_per_step() -> None:
+async def test_grade_answer_only_sees_one_question_and_the_interpretation() -> None:
     requests: list[httpx.Request] = []
+    grader = _capturing(requests, _mark_response(True))
+    await grader.grade_answer("the blind interpretation", "the question", "the answer")
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return _messages_response(_steps_response(_step(), _step()))
-
-    grader = RealGrader(
-        api_key="test-key",
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-    await grader.generate_tutorial(_DIFF, "question")
-
-    schema = json.loads(requests[0].content)["output_config"]["format"]["schema"]
-    step = schema["properties"]["steps"]["items"]
-    assert {"check_question", "check_answer"} <= set(step["required"])
+    content = json.loads(requests[0].content)["messages"][0]["content"]
+    assert "the blind interpretation" in content
+    assert "the question" in content
+    assert "the answer" in content
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_parses_step_checks() -> None:
-    grader = _grader_with(
-        _steps_response(
-            _step(check_question=" Why lock here? ", check_answer=" So two charges can't race. "),
-            _step(),
-        )
-    )
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
+@pytest.mark.parametrize("meaniemode", [False, True])
+async def test_meaniemode_selects_the_marking_tone(meaniemode: bool) -> None:
+    requests: list[httpx.Request] = []
+    grader = _capturing(requests, _mark_response(True), meaniemode=meaniemode)
+    await grader.grade_answer("interp", "q", "a")
 
-    assert breakdown.steps[0].check_question == "Why lock here?"
-    assert breakdown.steps[0].check_answer == "So two charges can't race."
-    assert breakdown.steps[1].check_question is None
-    # The check is not part of the prose grade_explanation is handed.
-    assert "Why lock here?" not in breakdown.text
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "check",
-    [
-        {"check_question": "Why?"},
-        {"check_answer": "Because."},
-        {"check_question": "Why?", "check_answer": "  "},
-        {"check_question": 7, "check_answer": "Because."},
-    ],
-)
-async def test_generate_tutorial_drops_a_half_check_but_keeps_the_step(check: dict) -> None:
-    """A question with no reference answer has nothing to reveal, so the
-    pair goes, and the step's prose stays."""
-    grader = _grader_with(_steps_response(_step(**check), _step()))
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-
-    assert len(breakdown.steps) == 2
-    assert breakdown.steps[0].check_question is None
-    assert breakdown.steps[0].check_answer is None
-    assert breakdown.steps[0].body == "What it does."
-
-
-@pytest.mark.anyio
-async def test_generate_tutorial_drops_steps_missing_prose() -> None:
-    grader = _grader_with(_steps_response(_step(), {"start_line": 1, "end_line": 2}, _step(body="  ")))
-    breakdown = await grader.generate_tutorial(_DIFF, "question")
-    assert len(breakdown.steps) == 1
+    system = json.loads(requests[0].content)["system"]
+    assert system == _grade_system_prompt(meaniemode=meaniemode)
+    assert ("scathing" in system) is meaniemode
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"reasoning": "not a walkthrough"}',
-        '{"steps": "not a list"}',
-        '{"steps": []}',
-        '{"steps": [{"title": "no body"}]}',
         "not json at all",
-        '{"steps": [{"title": "truncated", "body": "mid-obj',
+        '{"note": "no verdict"}',
+        '{"passed": "yes", "note": "n"}',
+        '{"passed": true}',
+        '{"passed": true, "note": "mid',  # truncated
     ],
-    ids=["no-steps-key", "steps-not-a-list", "steps-empty", "no-usable-steps", "not-json", "truncated"],
+    ids=["not-json", "no-passed", "passed-not-bool", "no-note", "truncated"],
 )
-async def test_generate_tutorial_unusable_response_raises_grading_error(payload: str) -> None:
-    """Nothing here may quietly become an empty walkthrough — the caller
-    (app/web.py:request_tutorial) turns GradingError into a retryable 502,
-    which is the only honest outcome when the model produced no lesson."""
+async def test_grade_answer_unusable_response_raises(payload: str) -> None:
     grader = _grader_with(payload)
     with pytest.raises(GradingError):
-        await grader.generate_tutorial(_DIFF, "question")
+        await grader.grade_answer("interp", "q", "a")
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_refusal_raises_grading_error() -> None:
-    grader = _grader_with(_messages_response("", stop_reason="refusal"))
-    with pytest.raises(GradingError):
-        await grader.generate_tutorial("diff", "question")
+async def test_grade_answer_max_tokens_names_the_budget() -> None:
+    grader = _grader_with(_messages_response('{"passed": tr', stop_reason="max_tokens"))
+    with pytest.raises(GradingError, match="token cap"):
+        await grader.grade_answer("interp", "q", "a")
 
 
 @pytest.mark.anyio
-async def test_generate_tutorial_http_error_raises_grading_error() -> None:
+async def test_grade_answer_http_error_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
 
@@ -441,43 +276,38 @@ async def test_generate_tutorial_http_error_raises_grading_error() -> None:
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(GradingError):
-        await grader.generate_tutorial("diff", "question")
+        await grader.grade_answer("interp", "q", "a")
+
+
+# --- explain ------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_grade_explanation_passes_on_clean_json() -> None:
-    grader = _grader_with(json.dumps({"passed": True, "reasoning": "shows understanding"}))
-    result = await grader.grade_explanation("diff", "breakdown", "explanation")
-    assert result.passed is True
-    assert result.model == "claude-opus-5"
-    assert result.prompt_version
+async def test_explain_returns_text() -> None:
+    grader = _grader_with("Here's what this section does: it takes a lock first.")
+    out = await grader.explain("interp", "why the lock?")
+    assert "lock" in out
 
 
 @pytest.mark.anyio
-async def test_grade_explanation_fails_on_clean_json() -> None:
-    grader = _grader_with(json.dumps({"passed": False, "reasoning": "still confused"}))
-    result = await grader.grade_explanation("diff", "breakdown", "explanation")
-    assert result.passed is False
-
-
-@pytest.mark.anyio
-async def test_grade_explanation_malformed_json_raises_grading_error() -> None:
-    grader = _grader_with("not json at all")
+async def test_explain_empty_raises() -> None:
+    grader = _grader_with("   ")
     with pytest.raises(GradingError):
-        await grader.grade_explanation("diff", "breakdown", "explanation")
+        await grader.explain("interp", "q")
 
 
-# --- Transient API failures ---------------------------------------------
-#
-# Grading runs synchronously inside the developer's request, and a
-# GradingError reaches them as "please try again" with no explanation. A
-# single 429, or a 529 overloaded_error, is routine and self-resolving --
-# it should not be something a human has to notice and retry by hand.
+@pytest.mark.anyio
+async def test_explain_refusal_raises() -> None:
+    grader = _grader_with(_messages_response("", stop_reason="refusal"))
+    with pytest.raises(GradingError):
+        await grader.explain("interp", "q")
+
+
+# --- Transient API failures (exercised through grade_answer's one call) --
 
 
 @pytest.fixture()
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Records the backoff delays without actually waiting them out."""
     slept: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
@@ -493,106 +323,68 @@ def _status_response(status_code: int, headers: dict | None = None) -> httpx.Res
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 529])
-async def test_retries_transient_status_and_then_succeeds(status: int, no_sleep) -> None:
-    grader = _grader_with(
-        _status_response(status),
-        "- adds a TTL",
-        json.dumps({"passed": True, "reasoning": "ok"}),
-    )
-
-    result = await grader.grade("diff", "question", "answer")
-
-    assert result.passed is True
-    assert no_sleep == [1.0], "one retry, one second of backoff"
+async def test_retries_transient_status_then_succeeds(status: int, no_sleep) -> None:
+    grader = _grader_with(_status_response(status), _mark_response(True))
+    mark = await grader.grade_answer("interp", "q", "a")
+    assert mark.passed is True
+    assert no_sleep == [1.0]
 
 
 @pytest.mark.anyio
-async def test_gives_up_after_max_attempts_with_exponential_backoff(no_sleep) -> None:
-    grader = _grader_with(
-        _status_response(529), _status_response(529), _status_response(529)
-    )
-
+async def test_gives_up_after_max_attempts(no_sleep) -> None:
+    grader = _grader_with(_status_response(529), _status_response(529), _status_response(529))
     with pytest.raises(GradingError, match="after 3 attempts"):
-        await grader.grade("diff", "question", "answer")
-
-    assert no_sleep == [1.0, 2.0], "backs off between attempts, not after the last"
+        await grader.grade_answer("interp", "q", "a")
+    assert no_sleep == [1.0, 2.0]
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 413])
-async def test_does_not_retry_a_failure_that_will_not_fix_itself(status: int, no_sleep) -> None:
-    """A bad API key or a malformed request retries identically; burning
-    two more calls and 3s of the developer's wait proves nothing."""
+async def test_does_not_retry_unfixable_status(status: int, no_sleep) -> None:
     grader = _grader_with(_status_response(status))
-
     with pytest.raises(GradingError):
-        await grader.grade("diff", "question", "answer")
-
-    assert no_sleep == [], "no backoff for a non-retryable status"
+        await grader.grade_answer("interp", "q", "a")
+    assert no_sleep == []
 
 
 @pytest.mark.anyio
 async def test_retries_a_transport_error(no_sleep) -> None:
-    """Connect/read timeouts and dropped connections are transient too."""
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         if calls["n"] == 1:
             raise httpx.ConnectTimeout("timed out")
-        if calls["n"] == 2:
-            return _messages_response("- adds a TTL")
-        return _messages_response(json.dumps({"passed": True, "reasoning": "ok"}))
+        return _messages_response(_mark_response(True))
 
     grader = RealGrader(
         api_key="test-key",
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-
-    result = await grader.grade("diff", "question", "answer")
-
-    assert result.passed is True
+    mark = await grader.grade_answer("interp", "q", "a")
+    assert mark.passed is True
     assert no_sleep == [1.0]
 
 
 @pytest.mark.anyio
-async def test_honours_retry_after_when_the_api_sends_one(no_sleep) -> None:
-    grader = _grader_with(
-        _status_response(429, headers={"retry-after": "4"}),
-        "- adds a TTL",
-        json.dumps({"passed": True, "reasoning": "ok"}),
-    )
-
-    await grader.grade("diff", "question", "answer")
-
-    assert no_sleep == [4.0], "the API knows its own backpressure better than a fixed curve"
+async def test_honours_retry_after(no_sleep) -> None:
+    grader = _grader_with(_status_response(429, headers={"retry-after": "4"}), _mark_response(True))
+    await grader.grade_answer("interp", "q", "a")
+    assert no_sleep == [4.0]
 
 
 @pytest.mark.anyio
 async def test_caps_an_unreasonable_retry_after(no_sleep) -> None:
-    """The developer is sitting on a synchronous request; a 10-minute
-    Retry-After is not something to hold it open for."""
-    grader = _grader_with(
-        _status_response(429, headers={"retry-after": "600"}),
-        "- adds a TTL",
-        json.dumps({"passed": True, "reasoning": "ok"}),
-    )
-
-    await grader.grade("diff", "question", "answer")
-
+    grader = _grader_with(_status_response(429, headers={"retry-after": "600"}), _mark_response(True))
+    await grader.grade_answer("interp", "q", "a")
     assert no_sleep == [10.0]
 
 
 @pytest.mark.anyio
-async def test_unparseable_retry_after_falls_back_to_backoff(no_sleep) -> None:
-    """The HTTP-date form isn't parsed; treat it as absent rather than
-    failing the call over a header."""
+async def test_unparseable_retry_after_falls_back(no_sleep) -> None:
     grader = _grader_with(
         _status_response(429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}),
-        "- adds a TTL",
-        json.dumps({"passed": True, "reasoning": "ok"}),
+        _mark_response(True),
     )
-
-    await grader.grade("diff", "question", "answer")
-
+    await grader.grade_answer("interp", "q", "a")
     assert no_sleep == [1.0]

@@ -153,37 +153,6 @@ def test_max_request_body_bytes_below_max_answer_bytes_is_rejected(monkeypatch) 
         Settings()
 
 
-def test_max_session_attempts_default_is_three(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    settings = Settings()
-    assert settings.max_session_attempts == 3
-
-
-def test_max_session_attempts_zero_is_accepted_as_unlimited(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "0")
-    settings = Settings()
-    assert settings.max_session_attempts == 0
-
-
-def test_negative_max_session_attempts_is_rejected(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("MAX_SESSION_ATTEMPTS", "-1")
-    with pytest.raises(ValidationError, match="MAX_SESSION_ATTEMPTS"):
-        Settings()
-
-
-def test_enable_tutorial_defaults_to_false(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    settings = Settings()
-    assert settings.enable_tutorial is False
-
-
-def test_enable_tutorial_can_be_turned_on(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("ENABLE_TUTORIAL", "true")
-    settings = Settings()
-    assert settings.enable_tutorial is True
 
 
 def test_meaniemode_defaults_to_false(monkeypatch) -> None:
@@ -199,52 +168,52 @@ def test_meaniemode_can_be_turned_on(monkeypatch) -> None:
     assert settings.meaniemode is True
 
 
-def test_strictness_defaults_to_standard_for_every_repo(monkeypatch) -> None:
+def test_exam_defaults(monkeypatch) -> None:
     _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
     settings = Settings()
-    assert settings.strictness_for("octo/anything") == "standard"
+    assert settings.exam_question_count == 5
+    assert settings.passingmarks == 3
+    assert settings.max_question_attempts == 3
 
 
-def test_grading_strictness_sets_the_default(monkeypatch) -> None:
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_question_attempts_below_one_is_rejected(monkeypatch, value) -> None:
     _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("GRADING_STRICTNESS", "strict")
-    settings = Settings()
-    assert settings.strictness_for("octo/anything") == "strict"
-
-
-def test_repo_strictness_overrides_the_default(monkeypatch) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("GRADING_STRICTNESS", "strict")
-    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", " octo/scratch = Lenient , octo/core=standard ")
-    settings = Settings()
-    assert settings.strictness_for("octo/scratch") == "lenient"
-    assert settings.strictness_for("octo/core") == "standard"
-    assert settings.strictness_for("octo/other") == "strict"
-
-
-@pytest.mark.parametrize("raw", ["", "  ", ","])
-def test_repo_strictness_blank_string_means_no_overrides(monkeypatch, raw) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", raw)
-    settings = Settings()
-    assert settings.strictness_for("octo/anything") == "standard"
-
-
-@pytest.mark.parametrize(
-    "raw", ["octo/repo=sloppy", "octo/repo", "not-a-repo=lenient", "octo/repo="]
-)
-def test_repo_strictness_rejects_malformed_entry(monkeypatch, raw) -> None:
-    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("GRUMPY_REPO_STRICTNESS", raw)
-    with pytest.raises(ValidationError, match="GRUMPY_REPO_STRICTNESS"):
+    monkeypatch.setenv("MAX_QUESTION_ATTEMPTS", value)
+    with pytest.raises(ValidationError):
         Settings()
 
 
-def test_grading_strictness_rejects_unknown_level(monkeypatch) -> None:
+def test_passingmarks_over_question_count_is_rejected(monkeypatch) -> None:
     _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
-    monkeypatch.setenv("GRADING_STRICTNESS", "sloppy")
-    with pytest.raises(ValidationError, match="grading_strictness"):
+    monkeypatch.setenv("EXAM_QUESTION_COUNT", "3")
+    monkeypatch.setenv("PASSINGMARKS", "4")
+    with pytest.raises(ValidationError, match="PASSINGMARKS"):
         Settings()
+
+
+def test_passingmarks_equal_to_question_count_is_allowed(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("EXAM_QUESTION_COUNT", "4")
+    monkeypatch.setenv("PASSINGMARKS", "4")
+    assert Settings().passingmarks == 4
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_passingmarks_below_one_is_rejected(monkeypatch, value) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("PASSINGMARKS", value)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_passing_marks_for_clamps_to_a_short_sheet(monkeypatch) -> None:
+    _set_required_env(monkeypatch, token=secrets.token_urlsafe(16))
+    monkeypatch.setenv("EXAM_QUESTION_COUNT", "5")
+    monkeypatch.setenv("PASSINGMARKS", "3")
+    settings = Settings()
+    assert settings.passing_marks_for(2) == 2
+    assert settings.passing_marks_for(5) == 3
 
 
 def test_evaluator_unset_uses_defaults(monkeypatch) -> None:

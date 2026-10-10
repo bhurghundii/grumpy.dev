@@ -1,11 +1,3 @@
-"""grumpy — FastAPI application, phase 4.
-
-/healthz (unauthenticated), POST /sessions + GET /verdict (bearer auth),
-GET /s/{token} + POST /s/{token}/answer (unauthenticated — the token is
-the credential). Grading is FakeGrader (FAKE_GRADER=true) or RealGrader,
-a two-call Anthropic Messages API grader (FAKE_GRADER=false).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -13,42 +5,30 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.auth import require_bearer_token
-from app.commit_status import GitHubStatusPublisher, NullStatusPublisher
-from app.config import Settings, get_settings
-from app.db import create_pool
+from app.ai.grading import FakeGrader, GradingError, RealGrader
+from app.auth.bearer import require_bearer_token
+from app.auth.repos import require_allowed_repo
+from app.config import get_settings
+from app.db.migrations import run_migrations
+from app.db.pool import create_pool
+from app.db.sessions import build_session_url, create_or_get_session
+from app.db.verdict import fetch_verdict
 from app.evaluator import evaluate
-from app.grading import FakeGrader, RealGrader
-from app.logging_config import configure_logging, redact_session_token
+from app.github.commit_status import GitHubStatusPublisher, NullStatusPublisher
+from app.logging.config import configure_logging, redact_session_token
 from app.middleware import MaxBodySizeMiddleware
-from app.migrations import run_migrations
-from app.questions import FixedQuestionGenerator
 from app.schemas import CreateSessionRequest
-from app.sessions import build_session_url, create_or_get_session
-from app.verdict import fetch_verdict
 from app.web import router as web_router
 
 request_logger = logging.getLogger("grumpy.request")
 startup_logger = logging.getLogger("grumpy.startup")
-
-
-def _require_allowed_repo(settings: Settings, repo: str) -> None:
-    """Shared by POST /sessions and GET /verdict — both must enforce the
-    (optional) repo allow-list identically, so a disallowed repo can't be
-    probed via /verdict even without permission to create a session for it.
-    """
-    if not settings.is_repo_allowed(repo):
-        raise HTTPException(
-            status_code=403,
-            detail=f"repo '{repo}' is not permitted on this deployment",
-        )
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -70,7 +50,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_size=settings.db_pool_max_size,
     )
     app.state.pool = pool
-    app.state.question_generator = FixedQuestionGenerator()
 
     if settings.fake_grader:
         app.state.grader = FakeGrader()
@@ -79,16 +58,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             api_key=settings.model_api_key.get_secret_value(), meaniemode=settings.meaniemode
         )
 
-    # Logged because NullStatusPublisher is silent by design: it posts
-    # nothing and says nothing, so a deployment whose GITHUB_STATUS_TOKEN
-    # never made it into the environment looks exactly like one where
-    # GitHub is rejecting the token — from the outside, and in the log.
-    # The workflow's own error ("No grumpy/verdict status on <sha>") can't
-    # tell them apart either. This line can: no commit_status warnings and
-    # `outcome: disabled` here means the token wasn't loaded; `enabled`
-    # plus a warning means GitHub refused it. Note the token is read once,
-    # at startup — setting it on a running deployment does nothing until
-    # the process restarts, which this line also makes visible.
+    # NullStatusPublisher is silent, so log which mode we are in: `disabled`
+    # means the token was not loaded, `enabled` plus a warning means GitHub
+    # refused it. The token is read once, at startup.
     if settings.github_status_token and settings.github_status_token.get_secret_value():
         app.state.status_publisher = GitHubStatusPublisher(
             settings.github_status_token.get_secret_value(), api_url=settings.github_api_url
@@ -108,29 +80,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await pool.close()
 
-
-# docs_url/redoc_url/openapi_url disabled: FastAPI serves these
-# unauthenticated by default, on the same public GRUMPY_BASE_URL handed to
-# Actions and PR authors. They don't leak secrets, but they hand any
-# visitor a browsable, executable reference to every request/response
-# shape — not something a public v1 should expose by default.
 app = FastAPI(title="grumpy", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(web_router)
-# Holds one file, app/static/nopaste.js (the paste guard on the answer and
-# explain-back textareas). Served same-origin so the CSP below can allow it
-# with `script-src 'self'` and nothing looser.
-app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
 
-# Must be added before the @app.middleware("http") functions below are
-# declared. Starlette's middleware stack nests in registration order: the
-# first add_middleware() call ends up innermost (right next to the
-# router), each later one wraps further out. MaxBodySizeMiddleware raises
-# internally and resolves that into a response itself — it must sit
-# innermost so that exception never has to cross a BaseHTTPMiddleware
-# boundary (log_requests/add_security_headers below are both
-# BaseHTTPMiddleware-based via the decorator, which is unreliable about
-# exceptions raised from receive()). With this order, both of those still
-# see and act on the resulting response normally, including a 413.
+app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "web" / "static"), name="static")
+
 app.add_middleware(MaxBodySizeMiddleware)
 
 
@@ -158,29 +112,12 @@ async def log_requests(request: Request, call_next):
                 "outcome": outcome,
                 "duration_ms": duration_ms,
                 "method": request.method,
-                # Never request.url.path raw: for /s/{token} routes that
-                # segment is the credential. See redact_session_token.
+                # Never the raw path: /s/{token} is the credential.
                 "path": redact_session_token(request.url.path),
             },
         )
 
-
-# Cheap defense-in-depth, concretely relevant here (not just generic
-# hardening): /s/{token}'s path segment *is* the credential — the classic
-# bearer-token-in-a-URL pattern sensitive to leaking via Referer.
-#
-# `script-src 'self'` exists for exactly one file, app/static/nopaste.js.
-# Same-origin files only, never 'unsafe-inline': an inline <script> or on*
-# handler smuggled into rendered markdown still doesn't run (see
-# app/rendering.py). `nosniff` keeps 'self' from stretching to grumpy's
-# HTML or JSON responses — browsers won't execute those as script.
-#
-# No `img-src`: it existed only to permit templates/result.html's hotlinked
-# third-party reward image, which is now an inline SVG. With that gone,
-# `default-src 'none'` covers images too (and `connect-src`, so the paste
-# guard can't phone home either), so the pages cannot make any outbound
-# request at all — nothing to leak a session URL to. `style-src` stays for
-# the <style> block each template carries inline.
+# Not great - need better ideas for security headers. 
 _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -216,17 +153,24 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
     request.state.head_sha = payload.head_sha
 
     settings = app.state.settings
-    _require_allowed_repo(settings, payload.repo)
+    require_allowed_repo(settings, payload.repo)
 
-    # Before the question and before any DB write: a rejected PR gets no
-    # session, so a smaller re-push starts clean. `rejection`, not FastAPI's
-    # `detail`, so the workflow can tell this 422 (fail the job) from a
-    # validation 422 (a malformed request — the workflow's bug, not the PR's).
+    # Reject early if an evaluator check fails.
     rejection = evaluate(payload.diff, settings)
     if rejection is not None:
         return JSONResponse(status_code=422, content={"rejection": rejection})
 
-    question = await app.state.question_generator.generate(payload.diff)
+    # Build the walkthrough up front so each screen grades with one model call.
+    # A failure fails this POST, and the next workflow run retries.
+    grader = app.state.grader
+    try:
+        interpretation = await grader.interpret(payload.diff)
+        questions = await grader.generate_exam(payload.diff, settings.exam_question_count)
+    except GradingError as exc:
+        return JSONResponse(
+            status_code=502, content={"detail": f"could not build the walkthrough: {exc}"}
+        )
+    question_dicts = [asdict(q) for q in questions]
     token = secrets.token_urlsafe(32)
 
     row, created = await create_or_get_session(
@@ -236,16 +180,16 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
         head_sha=payload.head_sha,
         base_sha=payload.base_sha,
         diff=payload.diff,
-        question=question,
+        question=questions[0].question,
+        questions=question_dicts,
+        interpretation=interpretation,
         token=token,
         ttl_days=settings.session_ttl_days,
     )
 
     session_url = build_session_url(settings.grumpy_base_url, row["token"])
 
-    # On every call, not only the one that created the session: re-running
-    # the workflow is how a status lost to a GitHub hiccup gets re-posted,
-    # and on a session that's already decided it re-posts that verdict.
+    # On every call, so re-running the workflow re-posts a status lost to a GitHub hiccup.
     await app.state.status_publisher.publish(
         repo=payload.repo,
         head_sha=payload.head_sha,
@@ -272,7 +216,7 @@ async def get_verdict(
     request.state.head_sha = head_sha
 
     settings = app.state.settings
-    _require_allowed_repo(settings, repo)
+    require_allowed_repo(settings, repo)
 
     status_value = await fetch_verdict(
         app.state.pool, repo=repo, pr_number=pr_number, head_sha=head_sha

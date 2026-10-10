@@ -60,7 +60,7 @@ def test_oversized_answer_form_body_rejected_with_413(grumpy_env, monkeypatch) -
     with TestClient(app) as client:
         response = client.post(
             "/s/" + secrets.token_urlsafe(32) + "/answer",
-            data={"answer": "x" * 2000},
+            data={"index": "0", "answer": "x" * 2000},
         )
 
     assert response.status_code == 413
@@ -93,7 +93,7 @@ def test_csp_forbids_all_outbound_subresource_requests(grumpy_env) -> None:
     request from one of those pages is a way for that URL to reach a third
     party. The exceptions are `style-src`, for the <style> block each
     template carries inline, and `script-src 'self'`, for the same-origin
-    paste guard (app/static/nopaste.js) — which must never grow
+    paste guard (app/web/static/nopaste.js) — which must never grow
     'unsafe-inline', or injected markup could run script.
 
     img-src previously allowed `https:` solely to permit a hotlinked
