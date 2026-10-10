@@ -53,7 +53,7 @@
   <p class="skipped">Not reached — the result was already decided.</p>
   {% endif -%}
   {% endfor -%}
-  {% if status == "failed" -%}
+  {% if status == "failed" and allow_restart -%}
   <form class="restart" method="post" action="/s/{{ token }}/restart">
     <button type="submit">Start over</button>
     <p class="skipped">Same change, fresh questions. You can do this as many times as you like.</p>

@@ -13,6 +13,7 @@ import logging
 import secrets
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from app.ai.grading import HIGH_LEVEL_QUESTION, FakeGrader, GradingError, QuestionMark
@@ -564,6 +565,11 @@ def test_concurrent_submits_for_one_screen_grade_once(grumpy_env) -> None:
 # --- start over -----------------------------------------------------------
 
 
+@pytest.fixture()
+def restart_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALLOW_RESTART", "true")
+
+
 def _fail_session(client: TestClient, token: str) -> None:
     for i in (0, 1, 2):
         _skip_screen(client, token, i)
@@ -573,7 +579,7 @@ def _restart(client: TestClient, token: str):
     return client.post(f"/s/{token}/restart", follow_redirects=False)
 
 
-def test_failed_page_offers_start_over_and_passed_does_not(grumpy_env) -> None:
+def test_failed_page_offers_start_over_and_passed_does_not(restart_on, grumpy_env) -> None:
     repo = f"octo/restart-btn-{secrets.token_hex(4)}"
     with TestClient(app) as client:
         failed = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
@@ -590,7 +596,7 @@ def test_failed_page_offers_start_over_and_passed_does_not(grumpy_env) -> None:
     assert "Start over" not in passed_page.text
 
 
-def test_start_over_resets_a_failed_session_to_pending(grumpy_env, database_url: str) -> None:
+def test_start_over_resets_a_failed_session_to_pending(restart_on, grumpy_env, database_url: str) -> None:
     repo = f"octo/restart-{secrets.token_hex(4)}"
     with TestClient(app) as client:
         token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
@@ -608,7 +614,7 @@ def test_start_over_resets_a_failed_session_to_pending(grumpy_env, database_url:
     assert _marks(database_url, token)["0"]["state"] == "passed"
 
 
-def test_start_over_can_be_repeated_without_limit(grumpy_env, database_url: str) -> None:
+def test_start_over_can_be_repeated_without_limit(restart_on, grumpy_env, database_url: str) -> None:
     repo = f"octo/restart-many-{secrets.token_hex(4)}"
     with TestClient(app) as client:
         token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
@@ -619,7 +625,7 @@ def test_start_over_can_be_repeated_without_limit(grumpy_env, database_url: str)
             assert _status(database_url, token) == "pending"
 
 
-def test_start_over_is_a_no_op_unless_failed(grumpy_env, database_url: str) -> None:
+def test_start_over_is_a_no_op_unless_failed(restart_on, grumpy_env, database_url: str) -> None:
     repo = f"octo/restart-noop-{secrets.token_hex(4)}"
     with TestClient(app) as client:
         token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
@@ -632,7 +638,7 @@ def test_start_over_is_a_no_op_unless_failed(grumpy_env, database_url: str) -> N
     assert _status(database_url, token) == "pending"
 
 
-def test_start_over_asks_for_questions_it_has_not_asked_before(grumpy_env) -> None:
+def test_start_over_asks_for_questions_it_has_not_asked_before(restart_on, grumpy_env) -> None:
     seen: list[list[str] | None] = []
 
     class RecordingGrader(FakeGrader):
@@ -651,7 +657,7 @@ def test_start_over_asks_for_questions_it_has_not_asked_before(grumpy_env) -> No
 
 
 def test_start_over_failure_is_502_and_leaves_the_session_failed(
-    grumpy_env, database_url: str
+    restart_on, grumpy_env, database_url: str
 ) -> None:
     class CannotWrite(FakeGrader):
         async def generate_exam(self, diff, count, avoid=None):
@@ -665,4 +671,17 @@ def test_start_over_failure_is_502_and_leaves_the_session_failed(
         resp = _restart(client, token)
 
     assert resp.status_code == 502
+    assert _status(database_url, token) == "failed"
+
+
+def test_start_over_is_off_by_default(grumpy_env, database_url: str) -> None:
+    repo = f"octo/restart-off-{secrets.token_hex(4)}"
+    with TestClient(app) as client:
+        token = _token_from_url(_create_session(client, grumpy_env.token, repo=repo)["session_url"])
+        _fail_session(client, token)
+        page = client.get(f"/s/{token}")
+        resp = _restart(client, token)
+
+    assert "Start over" not in page.text
+    assert resp.status_code == 403
     assert _status(database_url, token) == "failed"
