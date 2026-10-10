@@ -114,7 +114,7 @@ def _create_session(client: TestClient, token: str, repo: str):
             "pr_number": 1,
             "head_sha": _SHA,
             "base_sha": "b" * 40,
-            "diff": "diff --git a/x b/x\n+hello\n",
+            "diff": "diff --git a/x b/x\n@@ -0,0 +1,60 @@\n" + "+hello\n" * 60,
         },
         headers={"Authorization": f"Bearer {token}"},
     )

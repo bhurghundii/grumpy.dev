@@ -3,7 +3,7 @@ one rejection test per validated field, and the EVALUATOR rejections
 (oversized diff, too many changed lines).
 
 (Genuine concurrent-request idempotency is tested separately in
-test_idempotency.py — a sequential test here proves nothing about the race.)
+tests/api/test_idempotency.py — a sequential test here proves nothing about the race.)
 """
 
 from __future__ import annotations
@@ -197,3 +197,22 @@ def test_create_session_allows_repo_in_allowlist(grumpy_env, monkeypatch) -> Non
         response = client.post("/sessions", json=body, headers=_headers(grumpy_env.token))
 
     assert response.status_code == 201
+
+
+def test_a_tiny_diff_gets_only_the_high_level_question(grumpy_env) -> None:
+    diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+hello\n"
+    with TestClient(app) as client:
+        resp = client.post(
+            "/sessions",
+            json={
+                "repo": "acme/widgets",
+                "pr_number": 1,
+                "head_sha": "1" * 40,
+                "base_sha": "2" * 40,
+                "diff": diff,
+            },
+            headers={"Authorization": f"Bearer {grumpy_env.token}"},
+        )
+        assert resp.status_code in (200, 201)
+        page = client.get(resp.json()["session_url"])
+    assert "Question 1 of 1" in page.text

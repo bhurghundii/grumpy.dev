@@ -29,6 +29,8 @@ _DIFF = (
     "-    process(order)\n"
     "+    with acquire_lock(order):\n"
     "+        process(order)\n"
+    # Enough changed lines for a full-length sheet; see question_count_for.
+    + "".join(f"+    audit_step_{n}(order)\n" for n in range(60))
 )
 
 

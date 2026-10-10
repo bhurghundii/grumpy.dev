@@ -20,7 +20,7 @@ from app.db.migrations import run_migrations
 from app.db.pool import create_pool
 from app.db.sessions import build_session_url, create_or_get_session
 from app.db.verdict import fetch_verdict
-from app.evaluator import evaluate
+from app.evaluator import evaluate, question_count_for
 from app.github.commit_status import GitHubStatusPublisher, NullStatusPublisher
 from app.logging.config import configure_logging, redact_session_token
 from app.middleware import MaxBodySizeMiddleware
@@ -165,7 +165,7 @@ async def create_session(payload: CreateSessionRequest, request: Request) -> JSO
     grader = app.state.grader
     try:
         interpretation = await grader.interpret(payload.diff)
-        questions = await grader.generate_exam(payload.diff, settings.exam_question_count)
+        questions = await grader.generate_exam(payload.diff, question_count_for(payload.diff, settings))
     except GradingError as exc:
         return JSONResponse(
             status_code=502, content={"detail": f"could not build the walkthrough: {exc}"}
