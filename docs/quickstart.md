@@ -5,8 +5,8 @@ Self-host it locally.
 Requires Docker and Docker Compose.
 
 ```sh
-git clone https://github.com/<your-fork>/grumpy.git
-cd grumpy
+git clone https://github.com/bhurghundii/grumpy.dev.git
+cd grumpy.dev
 cp .env.example .env
 # edit .env: set GRUMPY_TOKEN to a real secret (see below) and GRUMPY_BASE_URL
 docker compose up --build

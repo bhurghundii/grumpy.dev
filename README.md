@@ -12,17 +12,21 @@ The result? More burnout. People just say: "LGTM, CI is green" and now you are s
 
 ## Features (so far)
 
-- **Local First** grumpy is self-hosted only - one Docker Compose command and it's running. You can get it to run in enterprise envs. BYOK of course.
-- **No GitHub App, no OAuth, no webhooks.** It's a FastAPI service (for now) that a GitHub Action talks to over a bearer token. Nothing to install on the GitHub side beyond a workflow file. Just keep the Grumpy token a secret.
-- **Answers get graded, reviewers can see if they get answered** Answers are graded by Claude against a blind interpretation of the diff. The results can be checked by the reviewer so they know the author actually has taken some effort understanding their work.
-- **Questions get asked for the entire PR** grumpy writes a question per part of the change, so a 1,000-line monstrosity gets picked apart section by section rather than waved through with one vague summary.
-- **Good development practices check** - Large PRs get outright rejected. More coming soon.
-- **No understanding? No merge** - Grumpy can block a PR if understanding criteria isn't met. 
-- **Sarcastic Mode** - For the thick skinned, Grumpy will brutally tear your understanding. I used to have a tech lead who did this. I miss them.
+- **An exam sheet for every PR.** grumpy reads the diff once to form its own blind interpretation, then writes a short sheet: the fixed high-level question plus scoped questions, each anchored to a specific part of the diff. The author sees one question per screen, next to just the slice of the diff it is about.
+- **Sized to the change.** One scoped question per 15 changed lines, up to `EXAM_QUESTION_COUNT`. A one-line PR gets one question, a 1,000-line monstrosity gets picked apart section by section, and nobody is quizzed on git headers.
+- **Graded on submit, leniently.** Claude marks each answer against the blind interpretation. A terse but correct answer passes; contradicting the diff fails. Wrong answers can be retried, then grumpy reveals the answer and moves on. "Explain it for me" gives a plain-language walkthrough of a section with no effect on the mark, and "Skip" gives up on a question.
+- **No understanding? No merge.** The session passes once `PASSINGMARKS` screens are correct and fails as soon as that is out of reach. grumpy reports it as a `grumpy/verdict` commit status; require it in branch protection and the PR cannot merge until the author passes.
+- **Good development practices check.** Oversized PRs and diffs are rejected before any question is asked. More coming soon.
+- **Local first.** Self-hosted only: one Docker Compose command and it's running, and it works in enterprise environments. BYOK of course.
+- **No GitHub App, no OAuth, no webhooks.** It's a FastAPI service that a GitHub Action talks to over a bearer token. Nothing to install on GitHub beyond a workflow file. Just keep the grumpy token a secret.
+- **Sarcastic mode.** For the thick skinned, grumpy will brutally tear your understanding. I used to have a tech lead who did this. I miss them.
 
-## Need a demo? 
+## Need a demo?
 
-Check out the PRs and see it in action 
+See it in action on real PRs:
+
+- [Demo 1: Pass a PR](https://github.com/bhurghundii/grumpy.dev/pull/30): answer well and `grumpy/verdict` goes green.
+- [Demo 2: Fail a PR](https://github.com/bhurghundii/grumpy.dev/pull/27): answer badly and the merge stays blocked.
 
 ## Contributing
 
@@ -34,20 +38,20 @@ I still think humans > AI any day though.
 
 ## Documentation
 
-Full docs live at **https://bhurghundii.github.io/grumpy/** (source in [`docs/`](docs/)):
+Full docs live at **https://bhurghundii.com/grumpy.dev/** (source in [`docs/`](docs/)):
 
-- [Quickstart](https://bhurghundii.github.io/grumpy/quickstart/): self-host it with Docker Compose
-- [How it works](https://bhurghundii.github.io/grumpy/how-it-works/)
-- [Wire it into a repo](https://bhurghundii.github.io/grumpy/wire-it-up/) and [block PRs until they pass](https://bhurghundii.github.io/grumpy/blocking-prs/)
-- [Configuration](https://bhurghundii.github.io/grumpy/configuration/)
-- [Deploying to Railway](https://bhurghundii.github.io/grumpy/deploy-railway/) and the [pre-launch security checklist](https://bhurghundii.github.io/grumpy/security/)
-- [Local development](https://bhurghundii.github.io/grumpy/development/) and [limitations](https://bhurghundii.github.io/grumpy/limitations/)
+- [Quickstart](https://bhurghundii.com/grumpy.dev/quickstart/): self-host it with Docker Compose
+- [How it works](https://bhurghundii.com/grumpy.dev/how-it-works/)
+- [Wire it into a repo](https://bhurghundii.com/grumpy.dev/wire-it-up/) and [block PRs until they pass](https://bhurghundii.com/grumpy.dev/blocking-prs/)
+- [Configuration](https://bhurghundii.com/grumpy.dev/configuration/)
+- [Deploying to Railway](https://bhurghundii.com/grumpy.dev/deploy-railway/) and the [pre-launch security checklist](https://bhurghundii.com/grumpy.dev/security/)
+- [Local development](https://bhurghundii.com/grumpy.dev/development/) and [limitations](https://bhurghundii.com/grumpy.dev/limitations/)
 
 ## Quick look
 
 ```sh
-git clone https://github.com/<your-fork>/grumpy.git
-cd grumpy
+git clone https://github.com/bhurghundii/grumpy.dev.git
+cd grumpy.dev
 cp .env.example .env
 # edit .env: set GRUMPY_TOKEN to a real secret and GRUMPY_BASE_URL
 docker compose up --build
